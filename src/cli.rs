@@ -618,10 +618,16 @@ fn settle(repo: &Repo, before: &State, st: &mut State, style: &Style) -> Result<
 fn report(outcome: Outcome) -> Result<()> {
     match outcome {
         Outcome::Done(r) => {
-            if r.moved.is_empty() {
-                println!("everything is already in place");
-            } else {
+            if !r.moved.is_empty() {
                 println!("restacked {}", r.moved.join(", "));
+            } else if r.blocked.is_empty() {
+                println!("everything is already in place");
+            }
+            for b in &r.blocked {
+                println!("{}", b.describe());
+            }
+            if !r.blocked.is_empty() {
+                println!("run `gh dags restack` again once they're clean");
             }
             Ok(())
         }

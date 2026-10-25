@@ -173,7 +173,10 @@ parent.
   there. On the fast path that worktree steps off the branch, the ref moves,
   and it steps back on, so its files follow. On a conflict, `git rebase` runs
   in that worktree and the journal records which one, so `--continue` and
-  `--abort` work from any worktree. Those worktrees have to be clean.
+  `--abort` work from any worktree. A worktree with uncommitted changes (or a
+  git operation in progress) holds back only its own change and what's
+  stacked on it: those are skipped and named, and the rest restacks. `submit`,
+  `sync` and `land` need every change in place, so they stop there.
 
 ## 6. GitHub projection
 

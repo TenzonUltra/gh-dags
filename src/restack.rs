@@ -29,6 +29,33 @@ pub struct Journal {
     pub home: PathBuf,
     /// Branch (or commit) to check out in `home` when done.
     pub return_to: String,
+    /// Changes left alone because a worktree has them checked out dirty.
+    #[serde(default)]
+    pub blocked: Vec<Blocked>,
+}
+
+/// A change that couldn't be rewritten under its worktree, and the changes
+/// stacked on it, which were left alone with it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Blocked {
+    pub change: String,
+    pub above: Vec<String>,
+    pub why: String,
+}
+
+impl Blocked {
+    pub fn describe(&self) -> String {
+        if self.above.is_empty() {
+            format!("skipped {}: {}", self.change, self.why)
+        } else {
+            format!(
+                "skipped {} (and {} on top of it): {}",
+                self.change,
+                self.above.join(", "),
+                self.why
+            )
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -43,6 +70,7 @@ pub struct Pending {
 pub struct Report {
     pub moved: Vec<String>,
     pub unchanged: usize,
+    pub blocked: Vec<Blocked>,
 }
 
 pub enum Outcome {
@@ -153,19 +181,6 @@ pub fn start(repo: &Repo, st: &mut State, scope: &Scope) -> Result<Outcome> {
         .filter(|n| scope.only.as_ref().is_none_or(|only| only.contains(n)))
         .filter(|n| !(scope.no_trunk && st.parent(n) == Some(Base::Trunk)))
         .collect();
-    let home = git.toplevel()?;
-    let blocked: Vec<String> = git
-        .worktrees()?
-        .into_iter()
-        .filter(|w| !same_path(&w.path, &home))
-        .filter_map(|w| {
-            let b = w.branch.filter(|b| queue.contains(b))?;
-            worktree::blocker(git, &b, &w.path)
-        })
-        .collect();
-    if !blocked.is_empty() {
-        bail!("can't restack yet:\n  {}", blocked.join("\n  "));
-    }
     trunk_tip(git, st)?;
 
     // A change whose parent is outside the scope goes onto that parent as it
@@ -217,8 +232,9 @@ pub fn start(repo: &Repo, st: &mut State, scope: &Scope) -> Result<Outcome> {
         queue,
         original_tips,
         pending: None,
-        home,
+        home: git.toplevel()?,
         return_to: git.head()?,
+        blocked: Vec::new(),
     };
     if journal.queue.contains(&journal.return_to) {
         // Rewriting the checked-out branch under the worktree; step off it.
@@ -351,6 +367,27 @@ fn run_queue(
         if in_place(git, &onto, &tip, fork.as_deref()) {
             report.unchanged += 1;
         } else {
+            let holder = worktree::checkout_of(git, &name)?;
+            if let Some(why) = holder
+                .as_ref()
+                .and_then(|p| worktree::blocker(git, &name, p))
+            {
+                // Leave it, and what's stacked on it, for a later restack.
+                let held = st.subtree(&name);
+                let above = journal.queue[1..]
+                    .iter()
+                    .filter(|n| held.contains(*n))
+                    .cloned()
+                    .collect();
+                journal.queue.retain(|n| !held.contains(n));
+                journal.blocked.push(Blocked {
+                    change: name,
+                    above,
+                    why,
+                });
+                repo.save_journal(&journal)?;
+                continue;
+            }
             let fork = match fork {
                 Some(f) => f,
                 None => git.merge_base(&tip, &onto).with_context(|| {
@@ -370,15 +407,7 @@ fn run_queue(
                 Replay::Failed => {
                     // Rebase where the change is checked out, so that
                     // worktree ends up on the result; anything else, at home.
-                    let dir = match worktree::checkout_of(git, &name)? {
-                        Some(path) => {
-                            if let Some(why) = worktree::blocker(git, &name, &path) {
-                                bail!("{why}");
-                            }
-                            path
-                        }
-                        None => journal.home.clone(),
-                    };
+                    let dir = holder.unwrap_or_else(|| journal.home.clone());
                     journal.pending = Some(Pending {
                         change: name.clone(),
                         onto: onto.clone(),
@@ -402,5 +431,6 @@ fn run_queue(
     }
     home.run(&["checkout", "--quiet", &journal.return_to])?;
     repo.clear_journal()?;
+    report.blocked = journal.blocked;
     Ok(Outcome::Done(report))
 }

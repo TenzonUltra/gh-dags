@@ -184,10 +184,26 @@ fn desired_stacks(st: &State) -> Vec<Desired> {
     out
 }
 
+/// Print what a restack moved, and fail if it had to leave changes behind:
+/// `what` needs every change in place.
+fn restacked(r: restack::Report, what: &str) -> Result<()> {
+    if !r.moved.is_empty() {
+        println!("restacked {}", r.moved.join(", "));
+    }
+    if !r.blocked.is_empty() {
+        let lines: Vec<String> = r.blocked.iter().map(|b| b.describe()).collect();
+        bail!(
+            "{}\n{what} needs every change restacked; run it again once they're clean",
+            lines.join("\n")
+        );
+    }
+    Ok(())
+}
+
 fn ensure_restacked(repo: &Repo, st: &mut State) -> Result<()> {
     if restack::needs_restack(&repo.git, st)? {
         match restack::start(repo, st, &restack::Scope::default())? {
-            Outcome::Done(r) => println!("restacked {}", r.moved.join(", ")),
+            Outcome::Done(r) => restacked(r, "submit")?,
             Outcome::Conflict { change, worktree } => bail!(
                 "restack stopped on a conflict in {}; resolve it and run \
                  `gh dags restack --continue`, then submit again",
@@ -510,7 +526,7 @@ pub fn sync(repo: &Repo, st: &mut State, gh: &Gh, style: &Style) -> Result<()> {
 
     if restack::needs_restack(git, st)? {
         match restack::start(repo, st, &restack::Scope::default())? {
-            Outcome::Done(r) => println!("restacked {}", r.moved.join(", ")),
+            Outcome::Done(r) => restacked(r, "sync")?,
             Outcome::Conflict { change, worktree } => bail!(
                 "restack stopped on a conflict in {}; resolve it and run `gh dags restack --continue`",
                 restack::conflict_place(&change, &worktree)
