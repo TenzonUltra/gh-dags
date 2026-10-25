@@ -82,7 +82,10 @@ independent of each other. One branch cannot have two bases, so either:
    You develop `C` with both present. `C` isn't submitted while parked. Once
    all but one of its sum members has landed, `sync` unparks it onto the
    remaining one automatically. If `A` and `B` conflict textually, the sum
-   can't be built, which tells you they aren't really independent.
+   can't be built, which tells you they aren't really independent. A restack
+   then holds `C` back (with what's on it), names the conflicting files, and
+   suggests stacking `B` on `A` to resolve the conflict once. `submit` and
+   `sync` carry on without it, since it isn't submitted.
 
 The sum commit is built without touching the worktree:
 `git merge-tree --write-tree A B` followed by `git commit-tree -p A -p B`. Its

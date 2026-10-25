@@ -196,6 +196,47 @@ fn parked_change_sits_on_a_deterministic_sum() {
 }
 
 #[test]
+fn a_sum_that_cant_be_built_holds_back_only_its_parked_changes() {
+    let sb = Sandbox::new();
+    sb.ok(&["new", "a"]);
+    sb.commit_file("a", "a\n", "a");
+    sb.ok(&["new", "b", "--on", "main"]);
+    sb.commit_file("b", "b\n", "b");
+    sb.ok(&["new", "c", "--on", "a,b", "--park"]);
+    sb.commit_file("c", "c\n", "c");
+    // a and b both start editing f, so their sum can't be built any more.
+    sb.git(&["checkout", "-q", "a"]);
+    sb.commit_file("f", "from a\n", "a edits f");
+    sb.git(&["checkout", "-q", "b"]);
+    sb.commit_file("f", "from b\n", "b edits f");
+    let c = sb.tip("c");
+
+    let out = sb.ok(&["restack"]);
+    for line in [
+        "skipped c: can't build the sum a ⊕ b: b conflicts with a in f",
+        "`gh dags move b --onto a`",
+    ] {
+        assert!(out.contains(line), "missing {line:?} in:\n{out}");
+    }
+    assert_eq!(sb.tip("c"), c);
+    assert!(!sb.work.join(".git/gh-dags/restack.json").exists());
+
+    // a and b still get PRs, and submit says why c doesn't.
+    let out = sb.ok(&["submit"]);
+    for line in [
+        "opened #1 a → main",
+        "opened #2 b → main",
+    ] {
+        assert!(out.contains(line), "missing {line:?} in:\n{out}");
+    }
+
+    // Stacking them unparks c, and the conflict comes up once, in b.
+    let (ok, out) = sb.dags(&["move", "b", "--onto", "a"]);
+    assert!(!ok && out.contains("conflict in \"b\""), "{out}");
+    assert!(out.contains("c now on b"), "{out}");
+}
+
+#[test]
 fn conflicts_stop_and_continue_or_abort() {
     for finish in ["continue", "abort"] {
         let sb = Sandbox::new();

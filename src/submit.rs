@@ -185,14 +185,20 @@ fn desired_stacks(st: &State) -> Vec<Desired> {
     out
 }
 
-/// Print what a restack moved, and fail if it had to leave changes behind:
-/// `what` needs every change in place.
-fn restacked(r: restack::Report, what: &str) -> Result<()> {
+/// Print what a restack moved, and fail if it had to leave changes behind
+/// that get PRs: `what` needs every one of those in place.
+fn restacked(r: restack::Report, st: &State, what: &str) -> Result<()> {
     if !r.moved.is_empty() {
         println!("restacked {}", r.moved.join(", "));
     }
-    if !r.blocked.is_empty() {
-        let lines: Vec<String> = r.blocked.iter().map(|b| b.describe()).collect();
+    // Parked changes stay local, so one left behind doesn't stop `what`.
+    let (parked, blocked): (Vec<_>, Vec<_>) =
+        r.blocked.iter().partition(|b| st.is_parked(&b.change));
+    for b in parked {
+        println!("{}", b.describe());
+    }
+    if !blocked.is_empty() {
+        let lines: Vec<String> = blocked.iter().map(|b| b.describe()).collect();
         bail!(
             "{}\n{what} needs every change restacked; run it again once they're clean",
             lines.join("\n")
@@ -202,9 +208,9 @@ fn restacked(r: restack::Report, what: &str) -> Result<()> {
 }
 
 fn ensure_restacked(repo: &Repo, st: &mut State) -> Result<()> {
-    if restack::needs_restack(&repo.git, st)? {
+    if restack::needs_restack(&repo.git, st, true)? {
         match restack::start(repo, st, &restack::Scope::default())? {
-            Outcome::Done(r) => restacked(r, "submit")?,
+            Outcome::Done(r) => restacked(r, st, "submit")?,
             Outcome::Conflict { change, worktree } => bail!(
                 "restack stopped on a conflict in {}; resolve it and run \
                  `gh dags restack --continue`, then submit again",
@@ -538,9 +544,9 @@ pub fn sync(repo: &Repo, st: &mut State, gh: &Gh, style: &Style) -> Result<()> {
         );
     }
 
-    if restack::needs_restack(git, st)? {
+    if restack::needs_restack(git, st, true)? {
         match restack::start(repo, st, &restack::Scope::default())? {
-            Outcome::Done(r) => restacked(r, "sync")?,
+            Outcome::Done(r) => restacked(r, st, "sync")?,
             Outcome::Conflict { change, worktree } => bail!(
                 "restack stopped on a conflict in {}; resolve it and run `gh dags restack --continue`",
                 restack::conflict_place(&change, &worktree)
@@ -639,7 +645,8 @@ pub fn land(
     // Merge only what GitHub has seen: everything up to `change`, pushed as-is.
     let (si, pos) = st.locate(change).unwrap();
     let prefix = st.stacks[si].changes[..=pos].to_vec();
-    let mut current = !restack::needs_restack(&repo.git, st)?;
+    // Parked changes aren't merged, so they don't hold the merge up.
+    let mut current = !restack::needs_restack(&repo.git, st, false)?;
     for c in &prefix {
         let tip = repo.git.branch_tip(c)?;
         let ch = &st.changes[c];

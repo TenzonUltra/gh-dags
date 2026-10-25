@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::git::{Git, Replay};
@@ -111,19 +111,26 @@ pub fn trunk_tip(git: &Git, st: &State) -> Result<String> {
 
 /// The commit a change should sit on right now.
 pub fn parent_tip(git: &Git, st: &State, name: &str) -> Result<String> {
+    onto(git, st, name)?.map_err(|why| anyhow!("{why}"))
+}
+
+/// Where a change should sit right now, or why it can't sit anywhere yet:
+/// the sum it's parked on can't be built.
+fn onto(git: &Git, st: &State, name: &str) -> Result<Result<String, String>> {
     match st
         .parent(name)
         .with_context(|| format!("{name:?} isn't in any stack"))?
     {
-        Base::Trunk => trunk_tip(git, st),
-        Base::Change(p) => git.branch_tip(&p),
+        Base::Trunk => trunk_tip(git, st).map(Ok),
+        Base::Change(p) => git.branch_tip(&p).map(Ok),
         Base::Sum(ms) => sum_commit(git, &ms),
     }
 }
 
 /// The synthetic merge of several changes that a parked stack sits on. It's
 /// deterministic, so unchanged inputs give the same commit and nothing moves.
-pub fn sum_commit(git: &Git, members: &[String]) -> Result<String> {
+/// If the members conflict, it says where, and how to stack them instead.
+pub fn sum_commit(git: &Git, members: &[String]) -> Result<Result<String, String>> {
     let tips = members
         .iter()
         .map(|m| git.branch_tip(m))
@@ -136,20 +143,28 @@ pub fn sum_commit(git: &Git, members: &[String]) -> Result<String> {
     let mut acc = tips[0].clone();
     let mut tree = String::new();
     for (i, t) in tips.iter().enumerate().skip(1) {
-        tree = git.merge_tree(&acc, t)?.with_context(|| {
-            format!(
-                "can't build the sum {}: {} conflicts with the rest, so they aren't independent; \
-                 linearize instead (gh dags move)",
-                members.join(" ⊕ "),
-                members[i]
-            )
-        })?;
+        tree = match git.merge_tree(&acc, t)? {
+            Ok(tree) => tree,
+            Err(paths) => {
+                return Ok(Err(format!(
+                    "can't build the sum {}: {} conflicts with {} in {}, so they aren't \
+                     independent. Stack them instead (`gh dags move {} --onto {}`) and resolve \
+                     that once",
+                    members.join(" ⊕ "),
+                    members[i],
+                    members[..i].join(", "),
+                    paths.join(", "),
+                    members[i],
+                    members[i - 1]
+                )));
+            }
+        };
         acc = git.commit_tree(&tree, &[acc.clone(), t.clone()], &msg, time)?;
     }
     if tips.len() == 2 {
-        return Ok(acc);
+        return Ok(Ok(acc));
     }
-    git.commit_tree(&tree, &tips, &msg, time)
+    git.commit_tree(&tree, &tips, &msg, time).map(Ok)
 }
 
 /// Restack every change.
@@ -204,7 +219,10 @@ pub fn start(repo: &Repo, st: &mut State, scope: &Scope) -> Result<Outcome> {
         else {
             continue;
         };
-        let onto = parent_tip(git, st, name)?;
+        // A sum that can't be built is held back by the restack itself.
+        let Ok(onto) = onto(git, st, name)? else {
+            continue;
+        };
         let tip = git.branch_tip(name)?;
         if !in_place(git, &onto, &tip, Some(&fork))
             && let Some(mb) = git.merge_base(&tip, &onto)
@@ -315,10 +333,17 @@ pub fn abort(repo: &Repo, st: &mut State) -> Result<()> {
     repo.clear_journal()
 }
 
-/// Whether any change isn't sitting on its parent's current tip.
-pub fn needs_restack(git: &Git, st: &State) -> Result<bool> {
+/// Whether any change isn't sitting on its parent's current tip, counting
+/// parked changes only when `parked` (a sum that can't be built counts as
+/// needing a restack, which then says so).
+pub fn needs_restack(git: &Git, st: &State, parked: bool) -> Result<bool> {
     for name in st.topo_order()? {
-        let onto = parent_tip(git, st, &name)?;
+        if !parked && st.is_parked(&name) {
+            continue;
+        }
+        let Ok(onto) = onto(git, st, &name)? else {
+            return Ok(true);
+        };
         let tip = git.branch_tip(&name)?;
         let fork = st
             .change(&name)?
@@ -348,6 +373,22 @@ fn in_place(git: &Git, onto: &str, tip: &str, fork: Option<&str>) -> bool {
     }
 }
 
+/// Leave a change, and what's stacked on it, for a later restack.
+fn hold_back(journal: &mut Journal, st: &State, name: String, why: String) {
+    let held = st.subtree(&name);
+    let above = journal.queue[1..]
+        .iter()
+        .filter(|n| held.contains(*n))
+        .cloned()
+        .collect();
+    journal.queue.retain(|n| !held.contains(n));
+    journal.blocked.push(Blocked {
+        change: name,
+        above,
+        why,
+    });
+}
+
 fn run_queue(
     repo: &Repo,
     st: &mut State,
@@ -357,7 +398,14 @@ fn run_queue(
     let git = &repo.git;
     let home = Git::new(&journal.home);
     while let Some(name) = journal.queue.first().cloned() {
-        let onto = parent_tip(git, st, &name)?;
+        let onto = match onto(git, st, &name)? {
+            Ok(onto) => onto,
+            Err(why) => {
+                hold_back(&mut journal, st, name, why);
+                repo.save_journal(&journal)?;
+                continue;
+            }
+        };
         let tip = git.branch_tip(&name)?;
         let fork = st
             .change(&name)?
@@ -372,19 +420,7 @@ fn run_queue(
                 .as_ref()
                 .and_then(|p| worktree::blocker(git, &name, p))
             {
-                // Leave it, and what's stacked on it, for a later restack.
-                let held = st.subtree(&name);
-                let above = journal.queue[1..]
-                    .iter()
-                    .filter(|n| held.contains(*n))
-                    .cloned()
-                    .collect();
-                journal.queue.retain(|n| !held.contains(n));
-                journal.blocked.push(Blocked {
-                    change: name,
-                    above,
-                    why,
-                });
+                hold_back(&mut journal, st, name, why);
                 repo.save_journal(&journal)?;
                 continue;
             }

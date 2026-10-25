@@ -263,12 +263,26 @@ impl Git {
         Ok(list)
     }
 
-    /// Merge two commits in memory. `None` means they conflict.
-    pub fn merge_tree(&self, a: &str, b: &str) -> Result<Option<String>> {
-        let out = self.exec(&["merge-tree", "--write-tree", a, b], None, &[])?;
+    /// Merge two commits in memory: the tree, or the paths that conflict.
+    pub fn merge_tree(&self, a: &str, b: &str) -> Result<Result<String, Vec<String>>> {
+        let args = [
+            "merge-tree",
+            "--write-tree",
+            "--name-only",
+            "--no-messages",
+            a,
+            b,
+        ];
+        let out = self.exec(&args, None, &[])?;
+        let mut lines = out.stdout.lines();
+        let tree = lines.next().unwrap_or_default().to_string();
         match out.code {
-            Some(0) => Ok(out.stdout.lines().next().map(str::to_string)),
-            Some(1) => Ok(None),
+            Some(0) => Ok(Ok(tree)),
+            Some(1) => {
+                let mut paths: Vec<String> = lines.map(String::from).collect();
+                paths.dedup();
+                Ok(Err(paths))
+            }
             _ => bail!("git merge-tree failed: {}", out.stderr),
         }
     }

@@ -691,7 +691,7 @@ fn report(outcome: Outcome) -> Result<()> {
                 println!("{}", b.describe());
             }
             if !r.blocked.is_empty() {
-                println!("run `gh dags restack` again once they're clean");
+                println!("then run `gh dags restack` again");
             }
             Ok(())
         }
