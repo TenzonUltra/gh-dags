@@ -631,6 +631,60 @@ fn scoped_restack_waits_for_a_stale_parent() {
     assert_eq!(sb.own_commits("b", "a"), ["a"]);
 }
 
+/// A `git` on PATH that reports `version` and is the real git otherwise.
+fn git_reporting(sb: &mut Sandbox, version: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let real = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    let real = String::from_utf8(real.stdout).unwrap();
+    let dir = sb._tmp.path().join(format!("git-{version}"));
+    fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("git");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'git version {version}'; \
+             else exec {} \"$@\"; fi\n",
+            real.trim()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::var("PATH").unwrap_or_default();
+    sb.env.retain(|(k, _)| k != "PATH");
+    sb.env
+        .push(("PATH".into(), format!("{}:{path}", dir.display())));
+}
+
+#[test]
+fn older_gits_restack_with_rebase_or_are_turned_away() {
+    let mut sb = Sandbox::new();
+    sb.ok(&["new", "a"]);
+    sb.commit_file("a", "a\n", "a");
+    sb.ok(&["new", "b"]);
+    sb.commit_file("b", "b\n", "b");
+    sb.git(&["checkout", "-q", "a"]);
+    sb.commit_file("a2", "a2\n", "a2");
+
+    // A replay without --ref-action: the restack runs `git rebase` instead.
+    git_reporting(&mut sb, "2.50.1");
+    let out = sb.ok(&["restack"]);
+    assert!(
+        out.contains("Successfully rebased") && out.contains("restacked b"),
+        "{out}"
+    );
+    assert_eq!(sb.own_commits("a", "b"), ["b"]);
+
+    git_reporting(&mut sb, "2.34.1");
+    let (ok, out) = sb.dags(&["view"]);
+    assert!(
+        !ok && out.contains("needs git 2.38 or newer, and this is git 2.34"),
+        "{out}"
+    );
+}
+
 #[test]
 fn completion_offers_names_from_the_repo() {
     let sb = Sandbox::new();

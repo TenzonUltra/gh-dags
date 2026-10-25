@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
 
@@ -33,6 +34,50 @@ pub enum Replay {
     Empty,
     /// Conflict, merge commits, or anything else replay can't do in memory.
     Failed,
+}
+
+/// The oldest git gh-dags works with: `merge-tree --write-tree` (2.38)
+/// builds the sums parked changes sit on.
+const MIN_GIT: (u32, u32) = (2, 38);
+
+/// The oldest `git replay` the in-memory restack uses. 2.53 added
+/// `--ref-action`, and 2.54 drops commits that become empty, as `git rebase`
+/// does; the tests run against that. Older gits restack with `git rebase`.
+const REPLAY_GIT: (u32, u32) = (2, 54);
+
+/// The installed git's (major, minor), if `git --version` can be read.
+pub fn version() -> Option<(u32, u32)> {
+    static VERSION: OnceLock<Option<(u32, u32)>> = OnceLock::new();
+    *VERSION.get_or_init(|| {
+        let out = Command::new("git").arg("--version").output().ok()?;
+        parse_version(&String::from_utf8_lossy(&out.stdout))
+    })
+}
+
+/// `git version 2.54.0 (Apple Git-157)` and `git version 2.45.1.windows.1`
+/// both read as (2, minor).
+fn parse_version(text: &str) -> Option<(u32, u32)> {
+    let mut parts = text.trim().strip_prefix("git version ")?.split('.');
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
+/// Fail unless git is new enough for gh-dags.
+pub fn check_version() -> Result<()> {
+    match version() {
+        Some(v) if v < MIN_GIT => bail!(
+            "gh-dags needs git {}.{} or newer, and this is git {}.{}; upgrade git",
+            MIN_GIT.0,
+            MIN_GIT.1,
+            v.0,
+            v.1
+        ),
+        _ => Ok(()),
+    }
+}
+
+/// Whether restacks can replay in memory instead of running `git rebase`.
+pub fn can_replay() -> bool {
+    version().is_some_and(|v| v >= REPLAY_GIT)
 }
 
 /// Fixed identity for synthetic sum commits, so identical inputs always give
@@ -329,5 +374,21 @@ impl Git {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         self.run(&args)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_version;
+
+    #[test]
+    fn reads_git_versions() {
+        assert_eq!(
+            parse_version("git version 2.54.0 (Apple Git-157)\n"),
+            Some((2, 54))
+        );
+        assert_eq!(parse_version("git version 2.45.1.windows.1"), Some((2, 45)));
+        assert_eq!(parse_version("git version 2.39.5"), Some((2, 39)));
+        assert_eq!(parse_version("not git"), None);
     }
 }

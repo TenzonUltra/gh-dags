@@ -18,6 +18,7 @@ pub struct Repo {
 
 impl Repo {
     pub fn open(cwd: impl Into<PathBuf>) -> Result<Repo> {
+        crate::git::check_version()?;
         let git = Git::new(cwd);
         let dir = git
             .common_dir()

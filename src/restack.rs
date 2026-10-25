@@ -394,13 +394,15 @@ fn run_queue(
                     format!("{name:?} has no history in common with its parent")
                 })?,
             };
-            // GH_DAGS_NO_REPLAY forces the `git rebase` path: for testing it
+            // Gits older than the replay we test against take the `git
+            // rebase` path, and GH_DAGS_NO_REPLAY forces it: for testing it
             // against replay, and for gits whose replay misbehaves.
-            let replayed = if std::env::var_os("GH_DAGS_NO_REPLAY").is_some() {
-                Replay::Failed
-            } else {
-                git.replay(&onto, &fork, &name)?
-            };
+            let replayed =
+                if std::env::var_os("GH_DAGS_NO_REPLAY").is_some() || !crate::git::can_replay() {
+                    Replay::Failed
+                } else {
+                    git.replay(&onto, &fork, &name)?
+                };
             match replayed {
                 Replay::Done(new) => worktree::move_branch(git, &name, &new, &tip)?,
                 Replay::Empty => worktree::move_branch(git, &name, &onto, &tip)?,
