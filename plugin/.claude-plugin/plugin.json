@@ -1,7 +1,7 @@
 {
   "name": "gh-dags",
   "displayName": "gh-dags",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Teaches Claude to work with gh-dags: dependency DAGs of branches, kept restacked and submitted as GitHub stacked PRs",
   "author": { "name": "TenzonUltra", "url": "https://github.com/TenzonUltra" },
   "homepage": "https://github.com/TenzonUltra/gh-dags",
