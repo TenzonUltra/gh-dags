@@ -198,7 +198,7 @@ pub fn hoist(st: &mut State, change: &str) -> Result<bool> {
         stacks[root].changes = chain;
         stacks.splice(root + 1..root + 1, sides);
         st.stacks = stacks;
-        reanchor(st, root);
+        reanchor(st, root, path.len());
         normalize(st);
         Ok(layout_key(st) != before)
     })
@@ -340,16 +340,20 @@ fn place(st: &mut State, chain: Vec<String>, onto: Base, github: Option<u64>) {
 /// Apply a new order to one stack, then re-anchor stacks hanging off it onto
 /// the highest node they actually need, so none of them loses a dependency.
 fn reorder_stack(st: &mut State, si: usize, order: Vec<String>) {
+    let len = order.len();
     st.stacks[si].changes = order;
-    reanchor(st, si);
+    reanchor(st, si, len);
 }
 
-/// After stack `si` was reordered, move each stack anchored on it up to the
-/// highest node it actually needs.
-fn reanchor(st: &mut State, si: usize) {
+/// After the first `upto` changes of stack `si` were reordered, move each
+/// stack anchored on them up to the highest of them it actually needs. (For
+/// `land`, that's the path; nothing anchored there can need what's above it,
+/// except through a sum's other member, which keeps its place.)
+fn reanchor(st: &mut State, si: usize, upto: usize) {
     let pos: BTreeMap<String, usize> = st.stacks[si]
         .changes
         .iter()
+        .take(upto)
         .enumerate()
         .map(|(i, c)| (c.clone(), i))
         .collect();
@@ -591,6 +595,22 @@ mod tests {
         assert_eq!(shape(&s), ["main: theme auth login", "auth: tests"]);
         assert!(s.false_deps("theme").is_empty());
         assert!(!hoist(&mut s, "theme").unwrap());
+    }
+
+    #[test]
+    fn hoist_leaves_parked_descendants_alone() {
+        // `a` needs nothing below it, so landing it changes nothing. It used
+        // to pull `c` up onto `b` (counting `d`'s need for `b`, which `d` gets
+        // from its sum's other member) and so unpark `d`. Found by checking
+        // the code against the Lean model.
+        let mut s = st();
+        add(&mut s, "a", &[]);
+        add(&mut s, "b", &["a"]);
+        add(&mut s, "c", &["a"]);
+        park(&mut s, "d", &["b", "c"]);
+        assert_eq!(shape(&s), ["main: a b", "a: c", "b ⊕ c: d"]);
+        assert!(!hoist(&mut s, "a").unwrap());
+        assert_eq!(shape(&s), ["main: a b", "a: c", "b ⊕ c: d"]);
     }
 
     #[test]
