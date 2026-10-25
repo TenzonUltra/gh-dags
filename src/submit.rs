@@ -235,14 +235,9 @@ pub fn submit(repo: &Repo, st: &mut State, gh: &Gh, opts: Opts, style: &Style) -
     }
 
     // 3. Free every PR whose base changes: out of its stack, onto trunk.
-    let pre = plan_stacks(&desired_stacks(st), &gh.stacks()?);
-    for number in &pre.unstack {
-        gh.unstack(*number)?;
-        println!(
-            "dissolved GitHub stack {} to rebuild it",
-            style.cyan(&format!("#{number}"))
-        );
-    }
+    //    A stacked PR's base can't change, so any stack holding one is
+    //    dissolved, whatever the plan says (the plan only sees each layout
+    //    stack up to its first change without a PR).
     let mut moving = Vec::new();
     for name in &order {
         let Some(pr) = st.changes[name].pr.and_then(|n| info.get(&n)) else {
@@ -250,10 +245,26 @@ pub fn submit(repo: &Repo, st: &mut State, gh: &Gh, opts: Opts, style: &Style) -
         };
         let base = base_branch(st, name);
         if pr.base != base {
-            if pr.base != st.trunk {
-                gh.update_pr(pr.number, json!({"base": st.trunk}))?;
-            }
-            moving.push((name.clone(), pr.number, base));
+            moving.push((name.clone(), pr.number, pr.base.clone(), base));
+        }
+    }
+    let remote = gh.stacks()?;
+    let mut unstack = plan_stacks(&desired_stacks(st), &remote).unstack;
+    for (_, n, _, _) in &moving {
+        if let Some(r) = remote.iter().find(|r| r.prs.contains(&(*n, true))) {
+            unstack.insert(r.number);
+        }
+    }
+    for number in &unstack {
+        gh.unstack(*number)?;
+        println!(
+            "dissolved GitHub stack {} to rebuild it",
+            style.cyan(&format!("#{number}"))
+        );
+    }
+    for (_, n, old, _) in &moving {
+        if *old != st.trunk {
+            gh.update_pr(*n, json!({"base": st.trunk}))?;
         }
     }
 
@@ -297,7 +308,7 @@ pub fn submit(repo: &Repo, st: &mut State, gh: &Gh, opts: Opts, style: &Style) -
         repo.save(st)?;
         info.extend(gh.prs(&[n])?);
     }
-    for (name, n, base) in &moving {
+    for (name, n, _, base) in &moving {
         if *base != st.trunk {
             gh.update_pr(*n, json!({"base": base}))?;
         }

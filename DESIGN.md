@@ -184,8 +184,9 @@ it's always a safe temporary base:
    remote stack with the desired order. If they're equal, keep it. If the
    remote is a prefix, append to it. Otherwise it has to be rebuilt. Only real
    reorders (`land`, `move`, `link`) take this expensive path.
-2. **Free the PRs that move.** Unstack the stacks being rebuilt (a stacked PR's
-   base can't change), then retarget every PR whose base changes to trunk.
+2. **Free the PRs that move.** A stacked PR's base can't change, so unstack the
+   stacks being rebuilt *and* any stack holding a PR whose base changes. Then
+   retarget every such PR to trunk.
 3. **Push** every branch in one `git push --atomic`, with a per-branch
    `--force-with-lease=<branch>:<last pushed sha>`.
 4. **PRs.** Open any that are missing, with base = physical parent branch, draft

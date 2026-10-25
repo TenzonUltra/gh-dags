@@ -493,3 +493,28 @@ fn zsh_completion_script_parses() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// A change without a PR yet, linked in under a stacked PR: submit has to
+/// free the stacked PR before retargeting it. (Found while formalizing the
+/// retarget order in Lean: the pre-push plan only looked at stacks up to their
+/// first PR-less change, so it missed this one.)
+#[test]
+fn submit_frees_a_stacked_pr_before_retargeting_it() {
+    let sb = Sandbox::new();
+    sb.ok(&["new", "m"]);
+    sb.commit_file("m", "x\n", "m");
+    sb.ok(&["new", "n"]);
+    sb.commit_file("n", "x\n", "n");
+    sb.ok(&["submit"]);
+    assert_eq!(sb.stack(1), [1, 2]);
+
+    sb.git(&["checkout", "-q", "main"]);
+    sb.ok(&["new", "x"]);
+    sb.commit_file("x", "x\n", "x");
+    sb.ok(&["link", "m", "x"]);
+    let out = sb.ok(&["submit"]);
+    assert!(out.contains("retargeted #1 m → x"), "{out}");
+    assert_eq!(sb.pr_base(1), "x");
+    assert_eq!(sb.stack(2), [3, 1, 2]);
+    assert!(sb.github().get("implicitly_merged").is_none());
+}

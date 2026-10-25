@@ -87,6 +87,8 @@ struct World {
     cov: Coverage,
     /// PRs live on the fake GitHub, so merges go through `land`, not git.
     github: bool,
+    /// PR-less changes inserted under stacked PRs.
+    cov_inserted: usize,
 }
 
 impl World {
@@ -103,6 +105,7 @@ impl World {
             next: 0,
             cov: Coverage::default(),
             github: false,
+            cov_inserted: 0,
         }
     }
 
@@ -681,6 +684,8 @@ struct GithubCoverage {
     merged: usize,
     /// Lands that merged several PRs at once (a stack prefix).
     multi: usize,
+    /// PR-less changes inserted under stacked PRs.
+    inserted: usize,
 }
 
 impl World {
@@ -780,6 +785,27 @@ impl World {
             if !prs.is_empty() && !layout_stacks.contains(&(base.clone(), prs.clone())) {
                 self.fail(&format!("GitHub has a stale stack {prs:?} on {base}"));
             }
+        }
+    }
+
+    fn insert_under(&mut self) {
+        let st = self.state();
+        let stacked: Vec<String> = st
+            .stacks
+            .iter()
+            .filter(|s| s.base == Base::Trunk && s.changes.len() >= 2)
+            .map(|s| s.changes[0].clone())
+            .filter(|c| st.changes[c].pr.is_some())
+            .collect();
+        let Some(m) = self.rng.pick(&stacked).cloned() else {
+            return;
+        };
+        let name = format!("c{}", self.next);
+        self.next += 1;
+        if self.dags(&["new", &name, "--on", "main"]).0 {
+            self.commit(&name);
+            self.dags(&["link", &m, &name]);
+            self.cov_inserted += 1;
         }
     }
 
@@ -897,6 +923,10 @@ fn github_case(seed: u64, rounds: usize) -> GithubCoverage {
         if w.rng.below(2) == 0 {
             w.grow_spur();
         }
+        // A change without a PR yet, slipped in under a stacked PR.
+        if w.rng.below(3) == 0 {
+            w.insert_under();
+        }
         // Fan in across two stacks already on GitHub: linearizing puts one
         // on the other, so the next submit has to rebuild both.
         if w.rng.below(2) == 0 {
@@ -947,6 +977,7 @@ fn github_case(seed: u64, rounds: usize) -> GithubCoverage {
     if std::env::var_os("FUZZ_LOG").is_some() {
         eprintln!("{}", w.log.join("\n"));
     }
+    cov.inserted = w.cov_inserted;
     cov
 }
 
@@ -967,6 +998,7 @@ fn github(seeds: Vec<u64>, rounds: usize) {
         t.spur_stacks += c.spur_stacks;
         t.merged += c.merged;
         t.multi += c.multi;
+        t.inserted += c.inserted;
         t
     });
     eprintln!("github coverage: {total:?}");
@@ -975,6 +1007,7 @@ fn github(seeds: Vec<u64>, rounds: usize) {
             total.rebuilt >= 1 && total.multi >= 1 && total.spur_stacks >= 1,
             "{total:?}"
         );
+        assert!(total.inserted >= 1, "{total:?}");
     }
 }
 
