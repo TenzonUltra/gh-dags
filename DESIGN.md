@@ -247,6 +247,12 @@ remote branches**. For each change we track `pushed` (the last sha we pushed):
 | same | changed | Remote moved (GitHub rebase or a collaborator). Adopt the remote tip and recompute the fork point. |
 | changed | changed | Diverged. Stop and ask. |
 
+Adopting a tip, and fast-forwarding the local trunk, happen in whichever
+worktree has that branch checked out, the same way restack moves it (§5). A
+worktree with uncommitted changes keeps its branch: an adoption then stops
+`sync` before it restacks, and the trunk just isn't fast-forwarded, since
+restacks build on the remote trunk anyway.
+
 ## 8. UX
 
 ```

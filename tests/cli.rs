@@ -338,6 +338,55 @@ fn a_dirty_worktree_holds_back_only_its_own_changes() {
 }
 
 #[test]
+fn sync_updates_branches_checked_out_in_other_worktrees() {
+    for dirty in [false, true] {
+        let sb = Sandbox::new();
+        sb.ok(&["new", "a"]);
+        sb.commit_file("a", "a\n", "Add a");
+        sb.ok(&["new", "b"]);
+        sb.commit_file("b", "b\n", "Add b");
+        sb.ok(&["submit"]);
+        sb.git(&["checkout", "-q", "a"]);
+        let wb = sb.worktree("wt-b", "b");
+        let wm = sb.worktree("wt-main", "main");
+        if dirty {
+            fs::write(wb.work.join("b"), "dirty\n").unwrap();
+        }
+        let b = sb.tip("b");
+
+        // Merging a makes GitHub rebase b onto main; sync takes that, and
+        // fast-forwards main, each in the worktree that has it.
+        let (ok, out) = sb.dags(&["land", "a", "--method", "squash"]);
+        assert!(out.contains("merged: a"), "{out}");
+        assert_eq!(wm.branch(), "main");
+        assert_eq!(wm.status(), "");
+        assert_eq!(sb.tip("main"), sb.tip("origin/main"));
+        assert!(wm.work.join("a").exists());
+        assert!(
+            out.contains("a merged; switch off it (main is checked out in "),
+            "{out}"
+        );
+        if dirty {
+            assert!(
+                !ok && out.contains("b is checked out in ") && out.contains("uncommitted changes"),
+                "{out}"
+            );
+            assert_eq!(sb.tip("b"), b);
+            assert_eq!(wb.status(), "M b");
+            wb.git(&["checkout", "--", "b"]);
+            let out = sb.ok(&["sync"]);
+            assert!(out.contains("took b from origin"), "{out}");
+        } else {
+            assert!(ok && out.contains("took b from origin"), "{out}");
+        }
+        assert_eq!(sb.tip("b"), sb.tip("origin/b"));
+        assert_eq!(wb.branch(), "b");
+        assert_eq!(wb.status(), "");
+        assert!(wb.work.join("a").exists());
+    }
+}
+
+#[test]
 fn land_hoists_what_a_change_needs() {
     let sb = Sandbox::new();
     for name in ["a", "b"] {
