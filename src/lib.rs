@@ -2,6 +2,7 @@ pub mod cli;
 pub mod complete;
 pub mod git;
 pub mod github;
+pub mod import;
 pub mod layout;
 pub mod model;
 pub mod nav;

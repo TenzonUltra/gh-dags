@@ -397,7 +397,7 @@ fn reanchor(st: &mut State, si: usize, upto: usize) {
 
 /// Canonical form: sums keep only maximal members (collapsing to a plain base
 /// when one is left), and a lone spur on a stack top folds into that stack.
-fn normalize(st: &mut State) {
+pub(crate) fn normalize(st: &mut State) {
     st.stacks.retain(|s| !s.changes.is_empty());
     for i in 0..st.stacks.len() {
         if let Base::Sum(ms) = &st.stacks[i].base {
@@ -464,7 +464,7 @@ pub fn describe_moves(before: &State, after: &State) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod exhaustive;
+pub(crate) mod exhaustive;
 
 #[cfg(test)]
 mod tests {
