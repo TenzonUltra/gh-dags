@@ -51,6 +51,10 @@ invariant:
   change, and nothing else.
 - **Trees never get false dependencies**, checked separately for up to 5
   changes.
+- **`import` gets the layout back.** For every state, project what `submit`
+  would show GitHub (PR bases, metadata, stacks), rebuild from it, and require
+  the same layout, deps, and creation order. Without GitHub's stacks, require
+  the same parents (`src/import.rs`).
 
 | Run | States | Transitions |
 |---|---|---|

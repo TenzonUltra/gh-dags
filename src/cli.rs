@@ -130,6 +130,8 @@ enum Cmd {
     Bottom,
     /// Switch to the trunk branch
     Trunk,
+    /// Switch to the change for a PR, importing its DAG first if it isn't here
+    Checkout { pr: u64 },
     /// Switch to a change (with no name: pick from the tree)
     Switch { change: Option<String> },
     /// Print the shell code for tab completion of `gh dags`
@@ -313,6 +315,31 @@ pub fn run() -> Result<()> {
             )
         }),
         Cmd::Sync => with_github(&repo, |st, gh| submit::sync(&repo, st, gh, &style)),
+        Cmd::Checkout { pr } => with_github(&repo, |st, gh| {
+            let tracked = |st: &State| {
+                st.changes
+                    .iter()
+                    .find(|(_, c)| c.pr == Some(pr))
+                    .map(|(n, _)| n.clone())
+            };
+            let name = match tracked(st) {
+                Some(n) => n,
+                None => {
+                    let names = import::import(&repo, st, gh, &[pr], false)?;
+                    repo.save(st)?;
+                    println!("imported {}", names.join(", "));
+                    tracked(st).context("the import didn't bring that PR's change")?
+                }
+            };
+            go(
+                &repo,
+                st,
+                Nav {
+                    target: Some(name),
+                    note: None,
+                },
+            )
+        }),
         Cmd::Import { prs, all } => with_github(&repo, |st, gh| {
             if prs.is_empty() && !all {
                 bail!("name the PRs to import, or pass --all");
@@ -561,7 +588,8 @@ fn mutate(repo: &Repo, st: &mut State, cmd: Cmd) -> Result<()> {
         | Cmd::Switch { .. }
         | Cmd::Completion { .. }
         | Cmd::Complete { .. }
-        | Cmd::Import { .. } => {
+        | Cmd::Import { .. }
+        | Cmd::Checkout { .. } => {
             unreachable!()
         }
     }
