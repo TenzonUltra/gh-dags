@@ -167,11 +167,11 @@ def api(method, path, body):
     db["calls"].append("%s %s" % (method, "/".join(rest)))
     out = None
     if rest == ["pulls"] and method == "GET":
-        head = query["head"][0].split(":", 1)[1]
+        head = query["head"][0].split(":", 1)[1] if "head" in query else None
         out = [
             {"number": p["number"]}
             for p in db["prs"].values()
-            if p["head"] == head and p["state"] == "open"
+            if (head is None or p["head"] == head) and p["state"] == "open"
         ]
     elif rest == ["pulls"] and method == "POST":
         for b in (body["head"], body["base"]):
@@ -258,6 +258,8 @@ def graphql(query):
             "state": state,
             "isDraft": p["draft"],
             "baseRefName": p["base"],
+            "headRefName": p["head"],
+            "headRefOid": tip(p["head"]) if branch_exists(p["head"]) else "",
             "mergeCommit": {"oid": p["merge_commit"]} if p.get("merge_commit") else None,
             "body": p["body"],
             "url": "https://github.com/%s/%s/pull/%s" % (OWNER, NAME, n),

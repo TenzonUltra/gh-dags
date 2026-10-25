@@ -5,11 +5,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use crate::github::{Gh, RemoteStack};
 use crate::layout;
 use crate::model::{Base, Change, Stack, State};
+use crate::restack;
+use crate::store::Repo;
 use crate::submit::parse_meta;
 
 /// A change as GitHub shows it: an open PR carrying gh-dags' metadata.
@@ -27,6 +29,78 @@ pub struct RemoteChange {
 /// Where a PR sits in a GitHub stack, by PR number: (stack number, position
 /// among the stack's open PRs).
 pub type Placement = BTreeMap<u64, (u64, usize)>;
+
+/// `gh dags import`: bring the DAG around `seeds` (or, with `all`, every
+/// open PR gh-dags made) into this repository, with local branches. Returns
+/// the changes it added.
+pub fn import(
+    repo: &Repo,
+    st: &mut State,
+    gh: &Gh,
+    seeds: &[u64],
+    all: bool,
+) -> Result<Vec<String>> {
+    let git = &repo.git;
+    git.run(&["fetch", "--quiet", &st.remote])?;
+    let (changes, placement) = discover(gh, &st.trunk, seeds, all)?;
+    if changes.is_empty() {
+        bail!("found no open PRs made by gh-dags");
+    }
+    if let Some(c) = changes.iter().find(|c| st.has(&c.name)) {
+        bail!(
+            "{} (#{}) is already tracked here; import only adds changes that aren't",
+            c.name,
+            c.pr
+        );
+    }
+    let mut new = rebuild(&st.trunk, &st.remote, &changes, &placement)?;
+
+    // Check every branch before creating any.
+    for c in &changes {
+        git.resolve(&c.head).with_context(|| {
+            format!(
+                "#{}'s head commit isn't here after fetching {}",
+                c.pr, st.remote
+            )
+        })?;
+        if let Some(sha) = git.resolve(&format!("refs/heads/{}", c.name))
+            && sha != c.head
+        {
+            bail!(
+                "branch {:?} already exists here, at a different commit than #{}; move it out of the way first",
+                c.name,
+                c.pr
+            );
+        }
+    }
+    for c in &changes {
+        if !git.branch_exists(&c.name) {
+            git.run(&["branch", "--quiet", "--no-track", &c.name, &c.head])?;
+        }
+    }
+    // Where each branch's own commits start.
+    for name in new.topo_order()? {
+        let onto = restack::parent_tip(git, &new, &name)?;
+        let tip = git.branch_tip(&name)?;
+        let fork = if git.is_ancestor(&onto, &tip) {
+            Some(onto)
+        } else {
+            git.merge_base(&tip, &onto)
+        };
+        new.change_mut(&name)?.fork = fork;
+    }
+
+    // Add to what's tracked already: disjoint, so stacks and changes just join.
+    for c in new.changes.values_mut() {
+        c.seq += st.next_seq;
+    }
+    let names: Vec<String> = new.topo_order()?;
+    st.next_seq += new.next_seq;
+    st.changes.extend(new.changes);
+    st.stacks.extend(new.stacks);
+    st.validate()?;
+    Ok(names)
+}
 
 /// Positions in GitHub's open stacks. Merged PRs stay listed at a stack's
 /// bottom; positions count only the open ones, like the layout does.
