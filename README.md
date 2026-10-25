@@ -45,6 +45,19 @@ mkdir -p ~/.local/share/gh/extensions/gh-dags
 ln -sf "$PWD/target/release/gh-dags" ~/.local/share/gh/extensions/gh-dags/gh-dags
 ```
 
+## With Claude
+
+A skill teaches Claude to work through `gh dags` instead of rebasing and
+pushing by hand. Install it as a Claude Code plugin:
+
+```bash
+claude plugin install gh-dags --marketplace TenzonUltra/gh-dags
+```
+
+Or `gh dags skill install` writes the copy that matches your gh-dags to
+`~/.claude/skills/` (`--project` for this repo's `.claude/skills/`). Each
+release also attaches `gh-dags-skill.zip`, for uploading to claude.ai.
+
 ## Use
 
 ```

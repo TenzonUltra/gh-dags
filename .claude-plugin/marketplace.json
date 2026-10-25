@@ -1,0 +1,12 @@
+{
+  "name": "gh-dags",
+  "owner": { "name": "TenzonUltra", "url": "https://github.com/TenzonUltra" },
+  "description": "The gh-dags plugin for Claude Code",
+  "plugins": [
+    {
+      "name": "gh-dags",
+      "source": "./plugin",
+      "description": "Teaches Claude to work with gh-dags: dependency DAGs of branches, kept restacked and submitted as GitHub stacked PRs"
+    }
+  ]
+}

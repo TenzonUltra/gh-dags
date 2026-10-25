@@ -33,6 +33,16 @@ struct Cli {
     cmd: Option<Cmd>,
 }
 
+#[derive(Subcommand)]
+enum SkillCmd {
+    /// Write the skill that matches this version to ~/.claude/skills/gh-dags
+    Install {
+        /// Into this repository's .claude/skills instead
+        #[arg(long)]
+        project: bool,
+    },
+}
+
 /// Where a navigation command lands.
 #[derive(clap::Args)]
 struct Dest {
@@ -167,6 +177,11 @@ enum Cmd {
     },
     /// Print the shell code for tab completion of `gh dags`
     Completion { shell: complete::Shell },
+    /// The Claude skill for working with gh-dags
+    Skill {
+        #[command(subcommand)]
+        cmd: SkillCmd,
+    },
     /// Completion candidates for a partial command line (used by `completion`)
     #[command(name = "__complete", hide = true)]
     Complete {
@@ -228,6 +243,9 @@ pub fn run() -> Result<()> {
             print!("{}", complete::script(*shell, &gh_script));
             return Ok(());
         }
+        Some(Cmd::Skill {
+            cmd: SkillCmd::Install { project },
+        }) => return crate::skill::install(*project),
         _ => {}
     }
     let repo = Repo::open(std::env::current_dir()?)?;
@@ -661,6 +679,7 @@ fn mutate(repo: &Repo, st: &mut State, cmd: Cmd) -> Result<()> {
         | Cmd::Trunk { .. }
         | Cmd::Switch { .. }
         | Cmd::Completion { .. }
+        | Cmd::Skill { .. }
         | Cmd::Complete { .. }
         | Cmd::Import { .. }
         | Cmd::Checkout { .. } => {

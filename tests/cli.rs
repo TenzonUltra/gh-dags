@@ -548,6 +548,33 @@ fn a_held_lock_makes_others_wait_and_goes_with_its_holder() {
 }
 
 #[test]
+fn skill_install_writes_the_built_in_skill() {
+    let sb = Sandbox::new();
+    let skill = fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/skills/gh-dags/SKILL.md"),
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        let out = command(env!("CARGO_BIN_EXE_gh-dags"), &sb.work, sb._tmp.path())
+            .args(args)
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    // Sandbox's HOME is its temp root.
+    let out = run(&["skill", "install"]);
+    let mine = sb._tmp.path().join(".claude/skills/gh-dags");
+    assert!(out.contains("installed the gh-dags skill in"), "{out}");
+    assert_eq!(fs::read_to_string(mine.join("SKILL.md")).unwrap(), skill);
+    assert!(mine.join("reference.md").exists());
+    run(&["skill", "install", "--project"]);
+    let theirs = sb.work.join(".claude/skills/gh-dags/SKILL.md");
+    assert_eq!(fs::read_to_string(theirs).unwrap(), skill);
+}
+
+#[test]
 fn land_hoists_what_a_change_needs() {
     let sb = Sandbox::new();
     for name in ["a", "b"] {
