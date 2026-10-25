@@ -137,6 +137,43 @@ pub fn start(repo: &Repo, st: &mut State, scope: &Scope) -> Result<Outcome> {
     }
     trunk_tip(git, st)?;
 
+    // A change whose parent is outside the scope goes onto that parent as it
+    // is. If the parent (or something under it) hasn't been restacked since
+    // the layout changed, it can still hold some of the change's own
+    // commits, and replaying those onto it would drop them.
+    for name in &queue {
+        let bases = match st.parent(name) {
+            Some(Base::Change(p)) => vec![p],
+            Some(Base::Sum(ms)) => ms,
+            _ => continue,
+        };
+        let outside: Vec<String> = bases.into_iter().filter(|b| !queue.contains(b)).collect();
+        if outside.is_empty() {
+            continue;
+        }
+        let Some(fork) = st.changes[name]
+            .fork
+            .clone()
+            .filter(|f| git.resolve(f).is_some())
+        else {
+            continue;
+        };
+        let onto = parent_tip(git, st, name)?;
+        let tip = git.branch_tip(name)?;
+        if !in_place(git, &onto, &tip, Some(&fork))
+            && let Some(mb) = git.merge_base(&tip, &onto)
+            && mb != fork
+            && git.is_ancestor(&fork, &mb)
+        {
+            bail!(
+                "{name} can't go on {stale} yet: it still has {name}'s commits from before the \
+                 layout changed; restack what's below {name} first \
+                 (`gh dags restack {name} --downstack`)",
+                stale = outside.join(", ")
+            );
+        }
+    }
+
     let mut original_tips = BTreeMap::new();
     for name in &queue {
         original_tips.insert(name.clone(), git.branch_tip(name)?);

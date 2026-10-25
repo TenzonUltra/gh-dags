@@ -267,7 +267,7 @@ the full state for scripts.
 | `link <change> <dep>…` / `unlink …` | Edit DAG edges. |
 | `move <change> --onto <target>` | Manual layout control. Validated against the invariant. |
 | `view` (default) | Tree view, as above. |
-| `restack [<change>] [--upstack\|--downstack] [--no-trunk]` | Rebase every change onto its physical parent, or only a change's subtree (`--upstack`) or ancestors (`--downstack`). `--no-trunk` leaves trunk-based changes in place. Also `--continue` / `--abort`. |
+| `restack [<change>] [--upstack\|--downstack] [--no-trunk]` | Rebase every change onto its physical parent, or only a change's subtree (`--upstack`) or ancestors (`--downstack`). `--no-trunk` leaves trunk-based changes in place. A scoped restack refuses to put a change on a parent outside the scope that still holds the change's own commits (it wasn't restacked after a layout change). Also `--continue` / `--abort`. |
 | `up/down [n]`, `top`, `bottom`, `trunk`, `switch [<change>]` | Navigation (see below). |
 | `completion <shell>` | Tab-completion hook (see below). |
 | `submit [--ready]` | Push, create or update PRs, update stacks and annotations. |
