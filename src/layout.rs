@@ -460,6 +460,9 @@ pub fn describe_moves(before: &State, after: &State) -> Vec<String> {
 }
 
 #[cfg(test)]
+mod exhaustive;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
