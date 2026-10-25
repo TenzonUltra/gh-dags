@@ -323,6 +323,12 @@ State lives in `<git-common-dir>/gh-dags/state.json`, so it isn't committed
 and is shared across worktrees. It is written atomically (temp file plus
 rename). `restack.json` is the in-progress journal.
 
+Every command but `view` reads the state and writes it back, so commands run
+one at a time. Each takes an OS file lock on `gh-dags/lock`, which the OS
+releases if the process dies, and writes what it is into the file. Another
+command, from any worktree, waits up to 30 seconds (`GH_DAGS_LOCK_WAIT`) and
+says what it's waiting for, then gives up.
+
 ```
 src/
   model.rs     State, Change, Stack, Base; graph queries and validate()

@@ -285,8 +285,9 @@ proofs. Reproduce one seed with
 - **The fake GitHub is a model.** It's calibrated against real GitHub for every
   rule listed. Merge queues, required checks, and repos that auto-delete head
   branches aren't modeled or tested.
-- **Not covered:** concurrent edits by other tools, and zsh completion
-  (syntax-checked only). The GitHub fuzz runs without worktrees, so `sync`'s
+- **Not covered:** other tools changing branches while gh-dags runs (gh-dags
+  commands themselves take a lock, and a test runs them in pairs), and zsh
+  completion (syntax-checked only). The GitHub fuzz runs without worktrees, so `sync`'s
   handling of them has end-to-end tests only.
 - **Proofs remove the size bound only for the two core claims.** See §5.
   Everything else is tested, not proven.

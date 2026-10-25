@@ -233,7 +233,17 @@ pub fn run() -> Result<()> {
     let repo = Repo::open(std::env::current_dir()?)?;
     let style =
         Style::new(std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none());
-    match cli.cmd.unwrap_or(Cmd::View { json: false }) {
+    let cmd = cli.cmd.unwrap_or(Cmd::View { json: false });
+    // Everything but `view` can change the state, refs, or worktrees, and
+    // reads the state before writing it back, so it runs alone.
+    let _lock = match cmd {
+        Cmd::View { .. } => None,
+        _ => {
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            Some(repo.lock(&format!("gh dags {}", args.join(" ")))?)
+        }
+    };
+    match cmd {
         Cmd::Init { trunk, remote } => init(&repo, trunk, remote),
         Cmd::View { json } => {
             let st = repo.load()?;
