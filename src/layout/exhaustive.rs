@@ -383,7 +383,7 @@ fn matches_proven_model(b: &State, x: &str, a: &State) -> std::result::Result<()
 }
 
 /// Breadth-first over distinct states; returns (states, transitions).
-fn explore(
+pub(crate) fn explore(
     max: usize,
     depth: usize,
     trees_only: bool,
