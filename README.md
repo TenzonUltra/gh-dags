@@ -29,7 +29,15 @@ line. ⚠ marks that order as layout-only.
 
 ## Install
 
-Needs git 2.44+ and `gh`.
+```bash
+gh extension install TenzonUltra/gh-dags
+```
+
+Prebuilt for Linux and macOS (x86-64 and arm64); update with
+`gh extension upgrade dags`. Needs git 2.38+. On git 2.54+ restacks run in
+memory, and on older gits they use `git rebase`.
+
+To build from source instead (Rust 1.88+):
 
 ```bash
 cargo build --release
