@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::github::{Gh, MergeStatus, PrInfo, RemoteStack, status_of};
@@ -114,6 +115,30 @@ pub fn annotation(st: &State, name: &str) -> String {
     }
     let meta = json!({"v": 1, "change": name, "deps": change.deps});
     format!("{START}\n---\n**gh-dags** · {text}\n<!-- gh-dags:meta {meta} -->\n{END}")
+}
+
+/// The machine-readable line in gh-dags' block: which change a PR is, and
+/// what it depends on.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Meta {
+    pub v: u32,
+    pub change: String,
+    #[serde(default)]
+    pub deps: BTreeSet<String>,
+}
+
+/// Read the metadata back out of a PR body. `None` if the PR wasn't made by
+/// gh-dags, or by a version whose format this one doesn't know.
+pub fn parse_meta(body: &str) -> Option<Meta> {
+    let s = body.find(START)?;
+    let e = s + body[s..].find(END)?;
+    let line = body[s..e].lines().find_map(|l| {
+        l.trim()
+            .strip_prefix("<!-- gh-dags:meta ")?
+            .strip_suffix(" -->")
+    })?;
+    let meta: Meta = serde_json::from_str(line).ok()?;
+    (meta.v == 1).then_some(meta)
 }
 
 /// Replace gh-dags' block in a PR body, or append it. The rest of the body
@@ -725,6 +750,35 @@ mod tests {
             ),
             "{login}"
         );
+    }
+
+    #[test]
+    fn meta_reads_back_what_annotation_writes() {
+        let mut st = State::new("main", "origin");
+        for (n, d) in [
+            ("auth", vec![]),
+            ("theme", vec![]),
+            ("login", vec!["auth", "theme"]),
+        ] {
+            let d: Vec<String> = d.into_iter().map(String::from).collect();
+            add_change(&mut st, n, &d, FanIn::Linearize).unwrap();
+        }
+        let body = upsert_block("Some words.\n", &annotation(&st, "login"));
+        let meta = parse_meta(&body).unwrap();
+        assert_eq!(meta.change, "login");
+        assert_eq!(meta.deps, st.changes["login"].deps);
+        assert!(
+            parse_meta(&annotation(&st, "auth"))
+                .unwrap()
+                .deps
+                .is_empty()
+        );
+
+        assert_eq!(parse_meta("A PR made by hand."), None);
+        let future = format!("{START}\n<!-- gh-dags:meta {{\"v\":2,\"change\":\"x\"}} -->\n{END}");
+        assert_eq!(parse_meta(&future), None, "unknown versions are left alone");
+        let outside = "<!-- gh-dags:meta {\"v\":1,\"change\":\"x\"} -->";
+        assert_eq!(parse_meta(outside), None, "only gh-dags' own block counts");
     }
 
     #[test]
