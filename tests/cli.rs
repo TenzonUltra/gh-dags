@@ -291,6 +291,53 @@ fn conflicts_in_another_worktree_are_resolved_there() {
 }
 
 #[test]
+fn a_dirty_worktree_holds_back_only_its_own_changes() {
+    let sb = Sandbox::new();
+    // main ← a ← x ← x2, plus a spur y on a.
+    sb.ok(&["new", "a"]);
+    sb.commit_file("a", "a\n", "a");
+    sb.ok(&["new", "x"]);
+    sb.commit_file("x", "x\n", "x");
+    sb.ok(&["new", "x2"]);
+    sb.commit_file("x2", "x2\n", "x2");
+    sb.git(&["checkout", "-q", "a"]);
+    sb.ok(&["new", "y"]);
+    sb.commit_file("y", "y\n", "y");
+    sb.git(&["checkout", "-q", "a"]);
+    let wx = sb.worktree("wt-x", "x");
+    let wy = sb.worktree("wt-y", "y");
+    fs::write(wx.work.join("x"), "dirty\n").unwrap();
+    let (x, x2) = (sb.tip("x"), sb.tip("x2"));
+
+    sb.commit_file("a2", "a2\n", "a2");
+    let out = sb.ok(&["restack"]);
+    for line in [
+        "restacked y",
+        "skipped x (and x2 on top of it): x is checked out in ",
+        "wt-x with uncommitted changes",
+    ] {
+        assert!(out.contains(line), "missing {line:?} in:\n{out}");
+    }
+    assert_eq!((sb.tip("x"), sb.tip("x2")), (x, x2));
+    assert_eq!(wx.status(), "M x");
+    assert_eq!(fs::read_to_string(wx.work.join("x")).unwrap(), "dirty\n");
+    assert_eq!(wy.status(), "");
+    assert!(wy.work.join("a2").exists());
+
+    let (ok, out) = sb.dags(&["submit"]);
+    assert!(
+        !ok && out.contains("submit needs every change restacked"),
+        "{out}"
+    );
+
+    wx.git(&["checkout", "--", "x"]);
+    let out = sb.ok(&["restack"]);
+    assert!(out.contains("restacked x, x2"), "{out}");
+    assert_eq!(wx.status(), "");
+    assert!(wx.work.join("a2").exists());
+}
+
+#[test]
 fn land_hoists_what_a_change_needs() {
     let sb = Sandbox::new();
     for name in ["a", "b"] {
