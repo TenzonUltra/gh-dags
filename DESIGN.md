@@ -297,6 +297,10 @@ the full state for scripts.
 - `top` and `bottom` stay within the current stack, which is the unit GitHub
   shows.
 - `switch` with no name numbers the tree's rows and reads a choice.
+- A change checked out in another worktree isn't switched to here; the
+  command says where it is. With `--print-path` it prints that worktree's
+  path instead (or this one's, after switching), for
+  `cd "$(gh dags up --print-path)"`.
 
 **Completion.** `gh` registers extensions with no completion hook, so
 `gh dags completion <shell>` prints a snippet that takes over when the second
@@ -381,6 +385,7 @@ Still open:
    continue/abort), `init/new/track/link/unlink/move/view/restack`, park.
 2. **GitHub.** `submit`, `sync`, annotations, `land`.
 3. **Done since.** Navigation (`up/down/top/bottom/switch`), tab completion,
-   and `import` / `checkout <pr>` (rebuild a DAG from its PRs).
-4. **Next.** Worktree support (#1), an interactive layout editor, and `plan`
-   (dry-run reorders with `git merge-tree` conflict prediction).
+   `import` / `checkout <pr>` (rebuild a DAG from its PRs), and worktree
+   support (#1).
+4. **Next.** An interactive layout editor, and `plan` (dry-run reorders with
+   `git merge-tree` conflict prediction).

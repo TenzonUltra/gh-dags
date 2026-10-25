@@ -512,6 +512,52 @@ fn navigation_follows_stacks_and_crosses_spurs() {
 }
 
 #[test]
+fn navigation_points_at_other_worktrees() {
+    let sb = Sandbox::new();
+    sb.ok(&["new", "a"]);
+    sb.commit_file("a", "a\n", "a");
+    sb.ok(&["new", "b"]);
+    sb.commit_file("b", "b\n", "b");
+    sb.git(&["checkout", "-q", "a"]);
+    let wb = sb.worktree("wt-b", "b");
+    // stdout only: that's what `cd (gh dags up --print-path)` reads.
+    let path_from = |args: &[&str]| {
+        let out = command(env!("CARGO_BIN_EXE_gh-dags"), &sb.work, sb._tmp.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?} failed");
+        let p = String::from_utf8(out.stdout).unwrap();
+        fs::canonicalize(p.trim()).unwrap()
+    };
+
+    let (ok, out) = sb.dags(&["up"]);
+    assert!(
+        !ok && out.contains("b is checked out in ") && out.contains("wt-b"),
+        "{out}"
+    );
+    assert_eq!(sb.branch(), "a");
+    assert_eq!(
+        path_from(&["up", "--print-path"]),
+        fs::canonicalize(&wb.work).unwrap()
+    );
+    assert_eq!(
+        sb.branch(),
+        "a",
+        "--print-path doesn't switch to another worktree's change"
+    );
+    assert_eq!(
+        path_from(&["trunk", "--print-path"]),
+        fs::canonicalize(&sb.work).unwrap()
+    );
+    assert_eq!(
+        sb.branch(),
+        "main",
+        "a change nobody else has is switched to here"
+    );
+}
+
+#[test]
 fn restack_can_be_scoped() {
     let sb = Sandbox::new();
     sb.ok(&["new", "a"]);
