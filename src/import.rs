@@ -7,8 +7,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Result, bail};
 
+use crate::github::{Gh, RemoteStack};
 use crate::layout;
 use crate::model::{Base, Change, Stack, State};
+use crate::submit::parse_meta;
 
 /// A change as GitHub shows it: an open PR carrying gh-dags' metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +27,82 @@ pub struct RemoteChange {
 /// Where a PR sits in a GitHub stack, by PR number: (stack number, position
 /// among the stack's open PRs).
 pub type Placement = BTreeMap<u64, (u64, usize)>;
+
+/// Positions in GitHub's open stacks. Merged PRs stay listed at a stack's
+/// bottom; positions count only the open ones, like the layout does.
+pub fn placement_of(stacks: &[RemoteStack]) -> Placement {
+    let mut out = Placement::new();
+    for s in stacks {
+        let open = s.prs.iter().filter(|(_, open)| *open).map(|(n, _)| *n);
+        for (i, n) in open.enumerate() {
+            out.insert(n, (s.number, i));
+        }
+    }
+    out
+}
+
+/// Find what to import on GitHub: the given PRs (or, with `all`, every open
+/// PR gh-dags made), plus every PR they depend on or sit on.
+pub fn discover(
+    gh: &Gh,
+    trunk: &str,
+    seeds: &[u64],
+    all: bool,
+) -> Result<(Vec<RemoteChange>, Placement)> {
+    let mut todo: Vec<u64> = if all { gh.open_prs()? } else { seeds.to_vec() };
+    let mut seen = BTreeSet::new();
+    let mut asked = BTreeSet::new();
+    let mut found: BTreeMap<String, RemoteChange> = BTreeMap::new();
+    while !todo.is_empty() {
+        let batch: Vec<u64> = todo.drain(..).filter(|n| seen.insert(*n)).collect();
+        let info = gh.prs(&batch)?;
+        for n in batch {
+            let Some(pr) = info.get(&n) else {
+                bail!("#{n} doesn't exist");
+            };
+            let meta = parse_meta(&pr.body);
+            let meta = match (pr.state.as_str(), meta) {
+                ("OPEN", Some(m)) => m,
+                // `--all` takes what's there and skips the rest.
+                _ if all => continue,
+                ("OPEN", None) => {
+                    bail!("#{n} wasn't opened by gh-dags: its description has no gh-dags metadata")
+                }
+                (state, _) => bail!(
+                    "#{n} is {}, so there's nothing to import",
+                    state.to_lowercase()
+                ),
+            };
+            if meta.change != pr.head {
+                bail!(
+                    "#{n}'s metadata is for {:?}, but its branch is {:?}",
+                    meta.change,
+                    pr.head
+                );
+            }
+            // What it needs, and what it sits on, come along.
+            for b in meta.deps.iter().chain([&pr.base]) {
+                if b != trunk
+                    && asked.insert(b.clone())
+                    && let Some(p) = gh.open_pr_for(b)?
+                {
+                    todo.push(p);
+                }
+            }
+            found.insert(
+                pr.head.clone(),
+                RemoteChange {
+                    name: pr.head.clone(),
+                    pr: n,
+                    base: pr.base.clone(),
+                    deps: meta.deps,
+                    head: pr.head_sha.clone(),
+                },
+            );
+        }
+    }
+    Ok((found.into_values().collect(), placement_of(&gh.stacks()?)))
+}
 
 /// The state these changes describe. Fork points are left to the caller,
 /// which can see the commits.
@@ -251,6 +329,19 @@ mod tests {
         assert!(
             err(&[change("a", 1, "main", &[]), change("b", 2, "main", &["a"])])
                 .contains("isn't stacked on it")
+        );
+    }
+
+    #[test]
+    fn placement_counts_only_open_prs() {
+        let stacks = [RemoteStack {
+            number: 7,
+            base: "main".into(),
+            prs: vec![(1, false), (2, false), (3, true), (4, true)],
+        }];
+        assert_eq!(
+            placement_of(&stacks),
+            Placement::from([(3, (7, 0)), (4, (7, 1))])
         );
     }
 

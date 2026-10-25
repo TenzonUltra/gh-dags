@@ -44,6 +44,9 @@ pub struct PrInfo {
     pub state: String,
     pub draft: bool,
     pub base: String,
+    /// The head branch, and the commit it's at.
+    pub head: String,
+    pub head_sha: String,
     pub body: String,
     pub url: String,
     /// The commit a merged PR became (a squash, merge or the last rebased
@@ -172,7 +175,7 @@ impl Gh {
                 .iter()
                 .map(|n| {
                     format!(
-                        "p{n}: pullRequest(number: {n}) {{ id number state isDraft baseRefName body url mergeCommit {{ oid }} }} "
+                        "p{n}: pullRequest(number: {n}) {{ id number state isDraft baseRefName headRefName headRefOid body url mergeCommit {{ oid }} }} "
                     )
                 })
                 .collect();
@@ -195,6 +198,8 @@ impl Gh {
                         state: p["state"].as_str().unwrap_or_default().to_string(),
                         draft: p["isDraft"].as_bool().unwrap_or(false),
                         base: p["baseRefName"].as_str().unwrap_or_default().to_string(),
+                        head: p["headRefName"].as_str().unwrap_or_default().to_string(),
+                        head_sha: p["headRefOid"].as_str().unwrap_or_default().to_string(),
                         body: p["body"].as_str().unwrap_or_default().to_string(),
                         url: p["url"].as_str().unwrap_or_default().to_string(),
                         merge_commit: p["mergeCommit"]["oid"].as_str().map(String::from),
@@ -213,6 +218,25 @@ impl Gh {
         );
         self.graphql(&q)?;
         Ok(())
+    }
+
+    /// Every open PR in the repository.
+    pub fn open_prs(&self) -> Result<Vec<u64>> {
+        let mut out = Vec::new();
+        for page in 1.. {
+            let path = self.repo_path(&format!("pulls?state=open&per_page=100&page={page}"));
+            let v = self.api("GET", &path, None)?;
+            let batch: Vec<u64> = v
+                .as_array()
+                .map(|a| a.iter().filter_map(|p| p["number"].as_u64()).collect())
+                .unwrap_or_default();
+            let done = batch.len() < 100;
+            out.extend(batch);
+            if done {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     pub fn open_pr_for(&self, branch: &str) -> Result<Option<u64>> {
