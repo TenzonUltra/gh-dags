@@ -400,6 +400,34 @@ fn restack_can_be_scoped() {
 }
 
 #[test]
+fn scoped_restack_waits_for_a_stale_parent() {
+    let sb = Sandbox::new();
+    sb.ok(&["new", "a"]);
+    sb.commit_file("a", "a\n", "a");
+    sb.ok(&["new", "b", "--on", "main"]);
+    sb.commit_file("b", "b\n", "b");
+    sb.ok(&["move", "b", "--onto", "a"]);
+    // Reorder to main ← b ← a while the worktree is dirty, so nothing is
+    // restacked yet and b still holds a's commit.
+    sb.git(&["checkout", "-q", "main"]);
+    fs::write(sb.work.join("README"), "dirty\n").unwrap();
+    sb.ok(&["move", "b", "--onto", "main"]);
+    sb.ok(&["move", "a", "--onto", "b"]);
+    sb.git(&["checkout", "--", "README"]);
+    let (a, b) = (sb.tip("a"), sb.tip("b"));
+
+    let (ok, out) = sb.dags(&["restack", "a", "--upstack"]);
+    assert!(
+        !ok && out.contains("a can't go on b yet: it still has a's commits"),
+        "{out}"
+    );
+    assert_eq!((sb.tip("a"), sb.tip("b")), (a, b));
+    sb.ok(&["restack", "a", "--downstack"]);
+    assert_eq!(sb.own_commits("main", "b"), ["b"]);
+    assert_eq!(sb.own_commits("b", "a"), ["a"]);
+}
+
+#[test]
 fn completion_offers_names_from_the_repo() {
     let sb = Sandbox::new();
     forked(&sb);
