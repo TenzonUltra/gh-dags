@@ -9,6 +9,12 @@
 //! on its parent; and restacking again must move nothing. Every seed also runs
 //! with GH_DAGS_NO_REPLAY, so the `git rebase` path is held to the same model.
 //!
+//! Some changes are checked out in worktrees of their own, some of those with
+//! an uncommitted edit. After every step each worktree is still on its change:
+//! a clean one at the new tip with a clean status, a dirty one untouched. A
+//! restack may skip only a dirty worktree's change that had to move, and then
+//! nothing stacked on it moves either.
+//!
 //! On failure the seed and the action log are printed. Reproduce with
 //! `FUZZ_SEED=<n> cargo test --test fuzz -- --nocapture`; run more with
 //! `FUZZ_SEEDS=<count> cargo test --release --test fuzz -- --ignored`.
@@ -21,6 +27,11 @@ use common::Sandbox;
 use gh_dags::layout;
 use gh_dags::model::{Base, State};
 use gh_dags::store::Repo;
+
+/// The uncommitted edit a dirty worktree holds, to a file no change commits
+/// to, so it lasts until it's undone.
+const SCRATCH: &str = "uncommitted\n";
+const SCRATCH_FILE: &str = "README";
 
 struct Rng(u64);
 
@@ -65,6 +76,10 @@ struct Coverage {
     merges: usize,
     scoped: usize,
     full: usize,
+    /// Changes moved under a clean worktree that has them checked out.
+    carried: usize,
+    /// Changes a restack skipped because a dirty worktree has them.
+    held_back: usize,
 }
 
 impl std::ops::AddAssign for Coverage {
@@ -75,6 +90,8 @@ impl std::ops::AddAssign for Coverage {
         self.merges += o.merges;
         self.scoped += o.scoped;
         self.full += o.full;
+        self.carried += o.carried;
+        self.held_back += o.held_back;
     }
 }
 
@@ -89,6 +106,15 @@ struct World {
     github: bool,
     /// PR-less changes inserted under stacked PRs.
     cov_inserted: usize,
+    /// Changes checked out in a worktree of their own.
+    worktrees: BTreeMap<String, Sandbox>,
+    /// Changes whose worktree has an uncommitted edit.
+    dirty: BTreeSet<String>,
+    next_wt: usize,
+    /// What the last gh-dags command held back (see `held_back`).
+    held: BTreeSet<String>,
+    /// Conflicts that came up in another worktree.
+    conflicts_elsewhere: usize,
 }
 
 impl World {
@@ -106,6 +132,11 @@ impl World {
             cov: Coverage::default(),
             github: false,
             cov_inserted: 0,
+            worktrees: BTreeMap::new(),
+            dirty: BTreeSet::new(),
+            next_wt: 0,
+            held: BTreeSet::new(),
+            conflicts_elsewhere: 0,
         }
     }
 
@@ -113,13 +144,17 @@ impl World {
         Repo::open(&self.sb.work).unwrap().load().unwrap()
     }
 
+    /// Run gh-dags. Whatever it was, it may have restacked, so check what
+    /// it held back, and keep that for the caller in `held`.
     fn dags(&mut self, args: &[&str]) -> (bool, String) {
+        let before = self.tips(&self.state());
         let (ok, out) = self.sb.dags(args);
         self.log.push(format!(
             "gh dags {} -> {}",
             args.join(" "),
             if ok { "ok" } else { "rejected" }
         ));
+        self.held = self.held_back(&self.state(), &before, &out);
         (ok, out)
     }
 
@@ -127,9 +162,14 @@ impl World {
         let v = self.m.version.entry(change.to_string()).or_insert(0);
         *v += 1;
         let subject = format!("{change} v{v}");
-        self.sb.git(&["checkout", "-q", change]);
-        self.sb
-            .commit_file(&format!("{change}.txt"), &format!("{subject}\n"), &subject);
+        let (file, content) = (format!("{change}.txt"), format!("{subject}\n"));
+        match self.worktrees.get(change) {
+            Some(wt) => wt.commit_file(&file, &content, &subject),
+            None => {
+                self.sb.git(&["checkout", "-q", change]);
+                self.sb.commit_file(&file, &content, &subject);
+            }
+        }
         self.m
             .own
             .entry(change.to_string())
@@ -141,6 +181,13 @@ impl World {
     fn step(&mut self) {
         let st = self.state();
         let names: Vec<String> = st.changes.keys().cloned().collect();
+        // Its own roll, so the GitHub fuzz (which has no worktrees) draws
+        // the same actions as ever.
+        if !self.github && !names.is_empty() && self.rng.below(6) == 0 {
+            self.worktree_op(&names);
+            self.check_worktrees();
+            return;
+        }
         let roll = self.rng.below(100);
         match roll {
             0..=19 if names.len() < 8 => self.new_change(&st, &names),
@@ -148,15 +195,7 @@ impl World {
                 let c = self.rng.pick(&names).unwrap().clone();
                 self.commit(&c);
             }
-            0..=38 => {
-                self.m.trunk += 1;
-                let subject = format!("main v{}", self.m.trunk);
-                self.sb.git(&["checkout", "-q", "main"]);
-                self.sb
-                    .commit_file("main.txt", &format!("{subject}\n"), &subject);
-                self.sb.git(&["push", "-q", "origin", "main"]);
-                self.log.push(format!("trunk {subject}"));
-            }
+            0..=38 => self.advance_trunk(),
             0..=44 if names.len() >= 2 => {
                 let (c, d) = (
                     self.rng.pick(&names).unwrap().clone(),
@@ -203,6 +242,151 @@ impl World {
             0..=88 if !names.is_empty() => self.scoped_restack(&st, &names),
             _ => self.full_restack(),
         }
+        self.check_worktrees();
+    }
+
+    fn advance_trunk(&mut self) {
+        self.m.trunk += 1;
+        let subject = format!("main v{}", self.m.trunk);
+        self.sb.git(&["checkout", "-q", "main"]);
+        self.sb
+            .commit_file("main.txt", &format!("{subject}\n"), &subject);
+        self.sb.git(&["push", "-q", "origin", "main"]);
+        self.log.push(format!("trunk {subject}"));
+    }
+
+    /// Check a change out in a worktree of its own, or edit one without
+    /// committing, undo that edit, or remove one.
+    fn worktree_op(&mut self, names: &[String]) {
+        let held: Vec<String> = self.worktrees.keys().cloned().collect();
+        let clean: Vec<String> = held
+            .iter()
+            .filter(|c| !self.dirty.contains(*c))
+            .cloned()
+            .collect();
+        let dirty: Vec<String> = self.dirty.iter().cloned().collect();
+        // Edits outlive their undos, so restacks meet dirty worktrees.
+        match self.rng.below(6) {
+            2 | 3 if !clean.is_empty() => {
+                let c = self.rng.pick(&clean).unwrap().clone();
+                let path = self.worktrees[&c].work.join(SCRATCH_FILE);
+                std::fs::write(path, SCRATCH).unwrap();
+                self.dirty.insert(c.clone());
+                self.log
+                    .push(format!("edit {c}'s worktree without committing"));
+            }
+            4 if !dirty.is_empty() => {
+                let c = self.rng.pick(&dirty).unwrap().clone();
+                self.worktrees[&c].git(&["checkout", "--", SCRATCH_FILE]);
+                self.dirty.remove(&c);
+                self.log.push(format!("undo the edit in {c}'s worktree"));
+            }
+            5 if !held.is_empty() => {
+                let c = self.rng.pick(&held).unwrap().clone();
+                self.remove_worktree(&c);
+            }
+            _ => {
+                let here = self.sb.branch();
+                let free: Vec<String> = names
+                    .iter()
+                    .filter(|n| !self.worktrees.contains_key(*n) && **n != here)
+                    .cloned()
+                    .collect();
+                if let Some(c) = self.rng.pick(&free).cloned() {
+                    self.add_worktree(&c);
+                }
+            }
+        }
+    }
+
+    fn add_worktree(&mut self, c: &str) {
+        let wt = self.sb.worktree(&format!("wt{}", self.next_wt), c);
+        self.next_wt += 1;
+        self.worktrees.insert(c.to_string(), wt);
+        self.log.push(format!("check {c} out in a worktree"));
+    }
+
+    fn remove_worktree(&mut self, c: &str) {
+        if let Some(wt) = self.worktrees.remove(c) {
+            self.sb
+                .git(&["worktree", "remove", "--force", wt.work.to_str().unwrap()]);
+            self.dirty.remove(c);
+            self.log.push(format!("remove {c}'s worktree"));
+        }
+    }
+
+    fn clean_worktrees(&mut self) {
+        for c in std::mem::take(&mut self.dirty) {
+            self.worktrees[&c].git(&["checkout", "--", SCRATCH_FILE]);
+            self.log.push(format!("undo the edit in {c}'s worktree"));
+        }
+    }
+
+    /// Every worktree is still on its change: a clean one has it checked out
+    /// cleanly (so at its tip), a dirty one still has just its own edit.
+    fn check_worktrees(&self) {
+        for (c, wt) in &self.worktrees {
+            let head = wt.git(&["rev-parse", "--abbrev-ref", "HEAD"]);
+            if head != *c {
+                self.fail(&format!("{c}'s worktree is on {head}"));
+            }
+            let dirty = self.dirty.contains(c);
+            let want = if dirty {
+                format!("M {SCRATCH_FILE}")
+            } else {
+                String::new()
+            };
+            let status = wt.status();
+            if status != want {
+                self.fail(&format!(
+                    "{c}'s worktree has status {status:?}, expected {want:?}"
+                ));
+            }
+            if dirty && std::fs::read_to_string(wt.work.join(SCRATCH_FILE)).unwrap() != SCRATCH {
+                self.fail(&format!("{c}'s worktree lost its uncommitted edit"));
+            }
+        }
+    }
+
+    /// What a restack held back: each change it says it skipped, and what's
+    /// stacked on it. Only a dirty worktree may hold a change back, only when
+    /// it had to move, and then none of those move at all. A change never
+    /// moves under a dirty worktree.
+    fn held_back(
+        &mut self,
+        st: &State,
+        before: &BTreeMap<String, String>,
+        out: &str,
+    ) -> BTreeSet<String> {
+        let mut held = BTreeSet::new();
+        for line in out.lines() {
+            let Some(rest) = line.strip_prefix("skipped ") else {
+                continue;
+            };
+            let d = rest.split([' ', ':']).next().unwrap().to_string();
+            if !self.dirty.contains(&d) {
+                self.fail(&format!(
+                    "{d} was skipped, but no dirty worktree has it:\n{out}"
+                ));
+            }
+            if self.misplaced(st, &d).is_none() {
+                self.fail(&format!("{d} was skipped, but it was already in place"));
+            }
+            self.cov.held_back += 1;
+            held.extend(st.subtree(&d));
+        }
+        // A change `new` just made isn't in `before`, and hasn't moved.
+        for n in held.iter().chain(&self.dirty) {
+            if before.get(n).is_some_and(|b| self.sb.tip(n) != *b) {
+                self.fail(&format!("{n} moved, though a dirty worktree holds it back"));
+            }
+        }
+        for n in self.worktrees.keys() {
+            if !self.dirty.contains(n) && before.get(n).is_some_and(|b| self.sb.tip(n) != *b) {
+                self.cov.carried += 1;
+            }
+        }
+        held
     }
 
     /// A new change on 0-3 deps; half the time the deps are stack tops,
@@ -308,8 +492,12 @@ impl World {
         let Some(m) = self.rng.pick(&bottoms).cloned() else {
             return;
         };
-        // Like `land`, merge only what's restacked.
+        // Like `land`, merge only what's restacked: never a change a dirty
+        // worktree held back, which can still have other changes' commits.
         self.full_restack();
+        if self.held.contains(&m) {
+            return;
+        }
         self.sb.git(&["checkout", "-q", "main"]);
         let tree = self.sb.git(&["merge-tree", "--write-tree", "main", &m]);
         let tree = tree.lines().next().unwrap();
@@ -332,6 +520,7 @@ impl World {
         self.m.merged.insert(m.clone());
         self.m.own.remove(&m);
         self.log.push(format!("merged {m}"));
+        self.remove_worktree(&m);
     }
 
     fn tips(&self, st: &State) -> BTreeMap<String, String> {
@@ -355,6 +544,29 @@ impl World {
         let flag = if up { "--upstack" } else { "--downstack" };
         self.cov.scoped += 1;
         let (ok, out) = self.dags(&["restack", &c, flag]);
+        // A change can't go on a parent outside the scope that still has its
+        // commits (a skip left it, or something under it, stale). Then that
+        // really is out of place, and nothing moved.
+        if !ok
+            && let Some(rest) = out.split(" can't go on ").nth(1)
+            && let Some((stale, _)) = rest.split_once(" yet:")
+        {
+            for p in stale.split(", ") {
+                let below = st.phys_ancestors(p);
+                let out_of_place = std::iter::once(p)
+                    .chain(below.iter().map(String::as_str))
+                    .any(|a| self.misplaced(st, a).is_some());
+                if scope.contains(p) || !out_of_place {
+                    self.fail(&format!(
+                        "refused over {p}, though it's in scope or in place:\n{out}"
+                    ));
+                }
+            }
+            if self.tips(st) != before {
+                self.fail("a refused restack moved something");
+            }
+            return;
+        }
         if !ok {
             self.fail(&format!("scoped restack failed:\n{out}"));
         }
@@ -368,11 +580,12 @@ impl World {
         }
         // In the scope, each change sits on its parent's current tip.
         let now = self.state();
+        let held = std::mem::take(&mut self.held);
         for n in now
             .topo_order()
             .unwrap()
             .iter()
-            .filter(|n| scope.contains(*n))
+            .filter(|n| scope.contains(*n) && !held.contains(*n))
         {
             self.check_placement(&now, n);
         }
@@ -385,19 +598,30 @@ impl World {
             self.fail(&format!("restack failed:\n{out}"));
         }
         let st = self.state();
-        for n in st.changes.keys() {
+        let held = std::mem::take(&mut self.held);
+        for n in st.changes.keys().filter(|n| !held.contains(*n)) {
             self.check_placement(&st, n);
             self.check_contents(&st, n);
         }
         let (_, out) = self.dags(&["restack"]);
-        if !out.contains("already in place") {
+        if out.contains("restacked") || (held.is_empty() && !out.contains("already in place")) {
             self.fail(&format!("a second restack moved something:\n{out}"));
         }
     }
 
-    /// The top commits of `n` are exactly its own, and below them is its
-    /// parent's tip (for a parked change: a merge of the sum's tips).
     fn check_placement(&mut self, st: &State, n: &str) {
+        if matches!(st.parent(n), Some(Base::Sum(_))) {
+            self.cov.parked_checked += 1;
+        }
+        if let Some(why) = self.misplaced(st, n) {
+            self.fail(&why);
+        }
+    }
+
+    /// Why `n` isn't in place, if it isn't. In place, its top commits are
+    /// exactly its own, and below them is its parent's tip (for a parked
+    /// change: a merge of the sum's tips).
+    fn misplaced(&self, st: &State, n: &str) -> Option<String> {
         let own = &self.m.own[n];
         let k = own.len();
         let subjects = self
@@ -405,7 +629,7 @@ impl World {
             .git(&["log", "--reverse", "--format=%s", "-n", &k.to_string(), n]);
         let subjects: Vec<&str> = subjects.lines().collect();
         if subjects != own.iter().map(String::as_str).collect::<Vec<_>>() {
-            self.fail(&format!(
+            return Some(format!(
                 "{n}'s top commits are {subjects:?}, expected {own:?}"
             ));
         }
@@ -413,31 +637,31 @@ impl World {
         // The recorded fork point has to be exactly where its commits start,
         // or a later restack would replay the wrong range.
         if st.changes[n].fork.as_deref() != Some(below.as_str()) {
-            self.fail(&format!(
+            return Some(format!(
                 "{n}'s recorded fork point isn't where its commits start"
             ));
         }
         match st.parent(n).unwrap() {
             Base::Trunk => {
                 if below != self.sb.tip("origin/main") {
-                    self.fail(&format!("{n} doesn't sit on origin/main"));
+                    return Some(format!("{n} doesn't sit on origin/main"));
                 }
             }
             Base::Change(p) => {
                 if below != self.sb.tip(&p) {
-                    self.fail(&format!("{n} doesn't sit on {p}'s tip"));
+                    return Some(format!("{n} doesn't sit on {p}'s tip"));
                 }
             }
             Base::Sum(ms) => {
-                self.cov.parked_checked += 1;
                 let line = self.sb.git(&["rev-list", "--parents", "-n1", &below]);
                 let parents: Vec<&str> = line.split(' ').skip(1).collect();
                 let want: Vec<String> = ms.iter().map(|m| self.sb.tip(m)).collect();
                 if parents != want.iter().map(String::as_str).collect::<Vec<_>>() {
-                    self.fail(&format!("{n} doesn't sit on the sum of {ms:?}"));
+                    return Some(format!("{n} doesn't sit on the sum of {ms:?}"));
                 }
             }
         }
+        None
     }
 
     /// `n` holds exactly the files of itself, its physical ancestors, and
@@ -477,7 +701,8 @@ impl World {
             .collect();
         let view = self.sb.dags(&["view"]).1;
         panic!(
-            "{msg}\n\nlayout:\n{view}\nlast actions:\n  {}",
+            "{msg}\n\n{}\nlayout:\n{view}\nlast actions:\n  {}",
+            self.log.first().map_or("", String::as_str),
             tail.iter()
                 .map(|s| s.as_str())
                 .collect::<Vec<_>>()
@@ -492,6 +717,7 @@ fn run(seed: u64, steps: usize, rebase: bool) -> Coverage {
     for _ in 0..steps {
         w.step();
     }
+    w.clean_worktrees();
     w.full_restack();
     if std::env::var_os("FUZZ_LOG").is_some() {
         eprintln!("{}", w.log.join("\n"));
@@ -533,6 +759,10 @@ fn fuzz(seeds: Vec<u64>, steps: usize, floor: usize, rebase: impl Fn(u64) -> boo
             "too few hoists that reordered: {cov:?}"
         );
         assert!(cov.merges >= floor && cov.scoped >= floor, "{cov:?}");
+        assert!(
+            cov.carried >= floor && cov.held_back >= floor,
+            "too few changes moved under, or held back by, worktrees: {cov:?}"
+        );
     }
 }
 
@@ -548,12 +778,12 @@ fn seeds(default: std::ops::Range<u64>) -> Vec<u64> {
 
 #[test]
 fn restack_matches_the_model_via_replay() {
-    fuzz(seeds(0..3), 60, 2, |_| false);
+    fuzz(seeds(0..5), 60, 2, |_| false);
 }
 
 #[test]
 fn restack_matches_the_model_via_rebase() {
-    fuzz(seeds(100..103), 60, 2, |_| true);
+    fuzz(seeds(100..105), 60, 2, |_| true);
 }
 
 #[test]
@@ -565,8 +795,9 @@ fn restack_fuzz_long() {
 /// Make `descendant` edit `owner`'s file, then amend `owner` so replaying
 /// that edit conflicts. Restack must stop; then either `--abort` restores
 /// everything exactly, or resolving and `--continue` finishes the job.
-/// Returns whether it aborted.
-fn conflict_case(seed: u64, rebase: bool) -> Option<bool> {
+/// Returns whether it aborted, and whether the conflict was in another
+/// worktree.
+fn conflict_case(seed: u64, rebase: bool) -> Option<(bool, bool)> {
     let mut w = World::new(seed, rebase);
     for _ in 0..3 + w.rng.below(4) {
         let st = w.state();
@@ -592,25 +823,37 @@ fn conflict_case(seed: u64, rebase: bool) -> Option<bool> {
     w.sb.commit_file(&format!("{x}.txt"), &format!("{edit}\n"), &edit);
     w.m.own.get_mut(&y).unwrap().push(edit);
     w.commit(&x);
+    // Half the time trunk moves too, so branches move before the conflict
+    // stops the restack, and an abort has to put them back.
+    if w.rng.below(2) == 0 {
+        w.advance_trunk();
+    }
     let names: Vec<String> = st.changes.keys().cloned().collect();
     let start = w.rng.pick(&names).unwrap().clone();
     w.sb.git(&["checkout", "-q", &start]);
     w.log.push(format!(
         "conflict: {y} edits {x}.txt, then {x} amends it; on {start}"
     ));
+    // Check most of the rest out in worktrees of their own, so conflicts
+    // come up, and get undone, where the change is checked out.
+    for n in names.iter().filter(|n| **n != start) {
+        if w.rng.below(3) != 0 {
+            w.add_worktree(n);
+        }
+    }
 
     let state_file = w.sb.work.join(".git/gh-dags/state.json");
     let journal = w.sb.work.join(".git/gh-dags/restack.json");
     let before_state = std::fs::read_to_string(&state_file).unwrap();
     let before_tips = w.tips(&st);
-    let (ok, out) = w.dags(&["restack"]);
+    let (ok, mut out) = w.dags(&["restack"]);
     if ok || !out.contains("conflict") {
         w.fail(&format!("expected a conflict:\n{out}"));
     }
 
     let abort = w.rng.below(2) == 0;
     if abort {
-        let (ok, out) = w.dags(&["restack", "--abort"]);
+        let (ok, out) = w.finish(&out, "--abort");
         if !ok {
             w.fail(&format!("abort failed:\n{out}"));
         }
@@ -625,14 +868,19 @@ fn conflict_case(seed: u64, rebase: bool) -> Option<bool> {
         }
     } else {
         for _ in 0..10 {
-            w.sb.commit_file_staged_only(&format!("{x}.txt"), "resolved\n");
-            let (ok, out) = w.dags(&["restack", "--continue"]);
+            let z = conflicted(&out);
+            w.worktrees
+                .get(&z)
+                .unwrap_or(&w.sb)
+                .commit_file_staged_only(&format!("{x}.txt"), "resolved\n");
+            let (ok, next) = w.finish(&out, "--continue");
             if ok {
                 break;
             }
-            if !out.contains("conflict") {
-                w.fail(&format!("--continue failed:\n{out}"));
+            if !next.contains("conflict") {
+                w.fail(&format!("--continue failed:\n{next}"));
             }
+            out = next;
         }
         let st = w.state();
         for n in st.changes.keys() {
@@ -645,23 +893,72 @@ fn conflict_case(seed: u64, rebase: bool) -> Option<bool> {
             w.fail("after --continue, things weren't in place, or HEAD moved");
         }
     }
-    Some(abort)
+    w.check_worktrees();
+    Some((abort, w.conflicts_elsewhere > 0))
+}
+
+/// The change a restack says it stopped on.
+fn conflicted(out: &str) -> String {
+    out.split("conflict in \"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .unwrap_or_default()
+        .to_string()
+}
+
+impl World {
+    /// `restack --continue` or `--abort`, from this worktree or (half the
+    /// time) from the one the conflict is in. The conflict message has to
+    /// say which worktree that is.
+    fn finish(&mut self, out: &str, how: &str) -> (bool, String) {
+        let z = conflicted(out);
+        let there = self.worktrees.get(&z);
+        if there.is_some() != out.contains("(checked out in ") {
+            self.fail(&format!(
+                "the conflict doesn't say where {z} is checked out:\n{out}"
+            ));
+        }
+        if there.is_some() {
+            self.conflicts_elsewhere += 1;
+        }
+        let from_there = self.rng.below(2) == 0;
+        let (ok, next) = match there {
+            Some(wt) if from_there => wt.dags(&["restack", how]),
+            _ => self.sb.dags(&["restack", how]),
+        };
+        self.log.push(format!(
+            "gh dags restack {how}{} -> {}",
+            if from_there && there.is_some() {
+                format!(" (from {z}'s worktree)")
+            } else {
+                String::new()
+            },
+            if ok { "ok" } else { "rejected" }
+        ));
+        (ok, next)
+    }
 }
 
 fn conflicts(seeds: Vec<u64>, rebase: bool) {
-    let (mut aborted, mut continued) = (0, 0);
+    let (mut aborted, mut continued, mut elsewhere) = (0, 0, 0);
     for seed in seeds {
-        match conflict_case(seed, rebase) {
-            Some(true) => aborted += 1,
-            Some(false) => continued += 1,
-            None => {}
+        let Some((abort, there)) = conflict_case(seed, rebase) else {
+            continue;
+        };
+        if abort {
+            aborted += 1;
+        } else {
+            continued += 1;
         }
+        elsewhere += usize::from(there);
     }
-    eprintln!("conflicts: {aborted} aborted, {continued} continued");
+    eprintln!(
+        "conflicts: {aborted} aborted, {continued} continued, {elsewhere} in other worktrees"
+    );
     if std::env::var("FUZZ_SEED").is_err() {
         assert!(
-            aborted >= 1 && continued >= 1,
-            "{aborted} aborted, {continued} continued"
+            aborted >= 1 && continued >= 1 && elsewhere >= 1,
+            "{aborted} aborted, {continued} continued, {elsewhere} in other worktrees"
         );
     }
 }
