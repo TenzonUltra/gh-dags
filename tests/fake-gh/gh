@@ -10,8 +10,10 @@ a stack squash-merges it and rebases the rest onto trunk.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from urllib.parse import parse_qs, urlsplit
 
 DB = os.environ["FAKE_GH_DB"]
@@ -48,6 +50,27 @@ def git(*args):
 
 def tip(branch):
     return git("rev-parse", "refs/heads/" + branch)
+
+
+def rebase(branch, old_base, new_base):
+    """Move branch's commits after old_base onto new_base. It runs `git
+    rebase` in a scratch worktree of the bare origin, which works on any git
+    gh-dags supports (`git replay` would need 2.44+)."""
+    scratch = tempfile.mkdtemp(prefix="fake-gh-")
+    wt = os.path.join(scratch, "wt")
+    git("worktree", "add", "--quiet", "--detach", wt, new_base)
+    try:
+        out = subprocess.run(
+            ["git", "-C", wt, "rebase", "--quiet", "--onto", new_base, old_base, branch],
+            capture_output=True,
+            text=True,
+        )
+        if out.returncode != 0:
+            subprocess.run(["git", "-C", wt, "rebase", "--abort"], capture_output=True)
+            raise SystemExit("fake gh: rebasing %s failed: %s" % (branch, out.stderr))
+    finally:
+        git("worktree", "remove", "--force", wt)
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def branch_exists(branch):
@@ -129,13 +152,8 @@ def merge(db, number):
     rest = [n for n in s["prs"] if pr(db, n)["state"] == "open"]
     for i, n in enumerate(rest):
         p = pr(db, n)
-        head_ref = "refs/heads/" + p["head"]
         before = tip(p["head"])
-        out = git("replay", "--ref-action=print", "--onto=" + new_base, "%s..%s" % (old_base, head_ref))
-        for line in out.splitlines():
-            _, ref, new = line.split()[:3]
-            if ref == head_ref:
-                git("update-ref", head_ref, new, before)
+        rebase(p["head"], old_base, new_base)
         if i == 0:
             p["base"] = TRUNK
         old_base, new_base = before, tip(p["head"])
