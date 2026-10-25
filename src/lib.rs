@@ -1,6 +1,8 @@
 pub mod git;
+pub mod github;
 pub mod layout;
 pub mod model;
 pub mod render;
 pub mod restack;
 pub mod store;
+pub mod submit;
