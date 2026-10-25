@@ -8,6 +8,7 @@ pub mod model;
 pub mod nav;
 pub mod render;
 pub mod restack;
+pub mod skill;
 pub mod store;
 pub mod submit;
 pub mod worktree;

@@ -1,1 +1,4 @@
 /target
+
+# claude plugin eval results
+plugin/evals/results/

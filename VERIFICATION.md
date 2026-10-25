@@ -272,10 +272,28 @@ path there. A release tag also runs it before building.
 cargo test --release -- --ignored
 ```
 
-That's the long runs, about 11 minutes. `cd proofs && lake build` checks the
-proofs. Reproduce one seed with
-`FUZZ_SEED=<n>`, print its action log with `FUZZ_LOG=1`, and scale up with
-`FUZZ_SEEDS=<count>`.
+That's the long runs, about 15 minutes. `cd proofs && lake build` checks the
+proofs. Reproduce one seed with `FUZZ_SEED=<n>`, print its action log with
+`FUZZ_LOG=1`, and scale up with `FUZZ_SEEDS=<count>`.
+
+**The Claude skill** (`plugin/skills/gh-dags/`) is checked two ways:
+
+- In `cargo test`: every `gh dags` command and flag it mentions has to exist
+  in the CLI, and the plugin's version has to be the crate's.
+- With `claude plugin eval`: `plugin/evals/` has cases for stacking two
+  changes, resolving a stopped restack, and moving a change to the bottom of
+  its stack without merging. Each case
+  installs this build as `gh dags` in a fresh home and repository, with no
+  GitHub. The runs use your Claude account, so they aren't in `cargo test` or
+  CI:
+
+  ```bash
+  claude plugin eval ./plugin --scaffold --trust-plugin --allow-tools Bash Write Edit
+  ```
+
+  On macOS this needs a git other than `/usr/bin/git`, such as Homebrew's.
+  The eval's sandbox can't run that one, which is a shim into Xcode, so each
+  case points the run at a script calling the other git directly.
 
 ## Limits
 
