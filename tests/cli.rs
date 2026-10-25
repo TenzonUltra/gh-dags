@@ -587,3 +587,27 @@ fn import_rebuilds_the_dag_in_another_clone() {
     assert!(out.contains("pushed auth"), "{out}");
     assert!(b.github().get("implicitly_merged").is_none());
 }
+
+#[test]
+fn checkout_imports_a_pr_then_switches_to_it() {
+    let a = Sandbox::new();
+    a.ok(&["new", "base"]);
+    a.commit_file("base", "x\n", "base");
+    a.ok(&["new", "top"]);
+    a.commit_file("top", "x\n", "top");
+    a.ok(&["submit"]);
+
+    let b = a.another_clone("work2");
+    let out = b.ok(&["checkout", "2"]);
+    assert!(
+        out.contains("imported base, top") && out.contains("on top"),
+        "{out}"
+    );
+    assert_eq!(b.branch(), "top");
+    let out = b.ok(&["checkout", "1"]);
+    assert!(
+        !out.contains("imported") && out.contains("on base"),
+        "already here: {out}"
+    );
+    assert_eq!(b.branch(), "base");
+}

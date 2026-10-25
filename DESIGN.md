@@ -208,8 +208,9 @@ their parent's new tip plus their own commits.
    ```
 
    This puts the DAG in front of reviewers, who would otherwise see only the
-   stack map. The `meta` line also lets the DAG be reconstructed on another
-   machine.
+   stack map. The `meta` line also lets `gh dags import` rebuild the DAG on
+   another machine: deps come from the meta lines, each change's parent from
+   its PR's base, and the grouping into stacks from GitHub's stacks.
 
 All API calls go through `gh api`, so auth, hosts (GHES), and `{owner}/{repo}`
 resolution come from `gh` itself.
@@ -272,6 +273,7 @@ the full state for scripts.
 | `submit [--ready]` | Push, create or update PRs, update stacks and annotations. |
 | `sync` | Absorb merges, restack, update GitHub. |
 | `land <change>` | Hoist, then merge the prefix when it's ready. |
+| `import [<pr>…] [--all]` / `checkout <pr>` | Rebuild a submitted DAG from its PRs, e.g. on a fresh clone. |
 
 **Navigation** follows the physical forest, not just one stack:
 
@@ -365,6 +367,7 @@ Still open:
 1. **Local core.** Model, layout ops, restack (replay and rebase,
    continue/abort), `init/new/track/link/unlink/move/view/restack`, park.
 2. **GitHub.** `submit`, `sync`, annotations, `land`.
-3. **Nice to have.** `up/down/checkout`, `gh dags import <pr>` (rebuild the DAG
-   from annotations), interactive layout editor, `plan` (dry-run reorders with
-   `git merge-tree` conflict prediction).
+3. **Done since.** Navigation (`up/down/top/bottom/switch`), tab completion,
+   and `import` / `checkout <pr>` (rebuild a DAG from its PRs).
+4. **Next.** Worktree support (#1), an interactive layout editor, and `plan`
+   (dry-run reorders with `git merge-tree` conflict prediction).

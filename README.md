@@ -48,7 +48,8 @@ gh dags land <change>
 ```
 
 Also: `view`, `track`, `untrack`, `link`, `unlink`, `move`, `restack`, `switch`,
-`up`, `down`, `top`, `bottom`, `trunk`, `completion <fish|zsh|bash>`.
+`up`, `down`, `top`, `bottom`, `trunk`, `completion <fish|zsh|bash>`,
+`import` (rebuild a submitted DAG on another clone), `checkout <pr>`.
 
 ## More
 
