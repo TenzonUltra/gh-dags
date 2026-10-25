@@ -125,7 +125,14 @@ impl Git {
     pub fn run(&self, args: &[&str]) -> Result<String> {
         let out = self.exec(args, None, &[])?;
         if !out.ok {
-            bail!("git {} failed: {}", args.join(" "), out.stderr);
+            // Some failures (`git commit` with nothing staged) only explain
+            // themselves on stdout.
+            let why = if out.stderr.is_empty() {
+                &out.stdout
+            } else {
+                &out.stderr
+            };
+            bail!("git {} failed: {why}", args.join(" "));
         }
         Ok(out.stdout)
     }

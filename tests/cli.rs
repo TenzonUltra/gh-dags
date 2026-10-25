@@ -387,6 +387,30 @@ fn sync_updates_branches_checked_out_in_other_worktrees() {
 }
 
 #[test]
+fn new_leaves_nothing_behind_when_its_commit_fails() {
+    let sb = Sandbox::new();
+    sb.ok(&["new", "a"]);
+    sb.commit_file("a", "a\n", "a");
+    // Nothing staged, so the commit fails: no branch, no change, and HEAD is
+    // back where it was.
+    let (ok, out) = sb.dags(&["new", "b", "-m", "b"]);
+    assert!(
+        !ok && out.contains("b wasn't created") && out.contains("nothing to commit"),
+        "{out}"
+    );
+    assert!(!sb.ok(&["view"]).contains(" b"));
+    assert_eq!(sb.branch(), "a");
+    fs::write(sb.work.join("b"), "b\n").unwrap();
+    sb.git(&["add", "b"]);
+    sb.ok(&["new", "b", "-m", "b"]);
+    assert_eq!(sb.own_commits("a", "b"), ["b"]);
+
+    let (ok, out) = sb.dags(&["new", "c", "-m", "c", "--no-checkout"]);
+    assert!(!ok && out.contains("cannot be used with"), "{out}");
+    assert!(!sb.git(&["branch", "--list", "c"]).contains('c'));
+}
+
+#[test]
 fn land_hoists_what_a_change_needs() {
     let sb = Sandbox::new();
     for name in ["a", "b"] {

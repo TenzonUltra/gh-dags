@@ -63,7 +63,7 @@ enum Cmd {
         #[arg(long)]
         park: bool,
         /// Commit the staged changes to the new branch with this message
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with = "no_checkout")]
         message: Option<String>,
         /// Create the branch without switching to it
         #[arg(long)]
@@ -578,17 +578,21 @@ fn mutate(repo: &Repo, st: &mut State, cmd: Cmd) -> Result<()> {
             }
             *st = trial;
             let start = restack::parent_tip(git, st, &name)?;
+            let back = git.head()?;
             if no_checkout {
                 git.run(&["branch", "--no-track", &name, &start])?;
             } else {
                 git.run(&["checkout", "--quiet", "--no-track", "-b", &name, &start])?;
             }
             st.change_mut(&name)?.fork = Some(start);
-            if let Some(msg) = message {
-                if no_checkout {
-                    bail!("--message needs the new branch checked out");
-                }
-                git.run(&["commit", "--quiet", "-m", &msg])?;
+            if let Some(msg) = message
+                && let Err(e) = git.run(&["commit", "--quiet", "-m", &msg])
+            {
+                // Leave nothing behind (the state isn't saved either), so
+                // the same `new` can just be run again.
+                git.run(&["checkout", "--quiet", &back])?;
+                git.run(&["branch", "-D", &name])?;
+                return Err(e.context(format!("{name} wasn't created")));
             }
         }
         Cmd::Track { branch, on, park } => {
