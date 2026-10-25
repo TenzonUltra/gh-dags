@@ -7,7 +7,7 @@ one fails when a bug is planted.
 | Layer | What could go wrong | How it's checked |
 |---|---|---|
 | Layout operations | An operation breaks the invariant, does the wrong thing, or refuses something legal | Exhaustive search of every small state |
-| Restack | Wrong replay order or fork point, a commit dropped or duplicated, a bad sum, a broken abort | Model-based fuzzing against real git |
+| Restack | Wrong replay order or fork point, a commit dropped or duplicated, a bad sum, a broken abort, a worktree left behind its branch | Model-based fuzzing against real git |
 | GitHub sequencing | Implicit merges, retargeting while stacked, stale stacks, missed merges | Model-based fuzzing against a fake GitHub |
 
 ## 1. Exhaustive bounded checking (`src/layout/exhaustive.rs`)
@@ -74,7 +74,9 @@ against a real repository with a bare `origin`:
 - squash merges plus absorbing;
 - `link`, `unlink`, `move` (including move-downs that must drop commits);
 - `land` (hoist);
-- scoped and full restacks.
+- scoped and full restacks;
+- worktrees: checking a change out in one of its own, leaving an uncommitted
+  edit there, undoing it, and removing the worktree.
 
 After every full restack, **every branch** must satisfy:
 
@@ -88,31 +90,47 @@ After every full restack, **every branch** must satisfy:
 - **Stability.** Restacking again moves nothing.
 
 After `restack --upstack/--downstack`, branches outside the scope must not have
-moved, and everything inside it must be placed correctly.
+moved, and everything inside it must be placed correctly. It may refuse to put
+a change on a parent outside the scope that still has the change's commits.
+Then that parent, or something under it, must really be out of place, and
+nothing may have moved.
+
+**Worktrees.** After every step, each worktree is still on its change. A clean
+one has a clean status, so its files are the new tip's. A dirty one still has
+exactly its uncommitted edit. After every gh-dags command, nothing in a dirty
+worktree has moved. Each change a restack says it skipped must be in a dirty
+worktree and must have needed to move, and nothing stacked on it may have
+moved either. Everything else gets the full checks above.
 
 **Conflicts.** A descendant edits a change's file, then the change is amended
 so the replay conflicts. Restack must stop on the conflict. After `--abort`,
 every branch tip, the state file *byte for byte*, and HEAD are exactly as they
 were. After resolving and running `--continue` (possibly through several
 conflicts), everything is placed correctly, the resolution sticks, and HEAD is
-back where it started.
+back where it started. Most changes are checked out in worktrees of their own,
+and half the time trunk moves too, so branches move before the conflict stops
+the restack. The message has to say which worktree the conflict is in, it's
+resolved there, and `--continue` or `--abort` runs from either worktree. After
+both, every worktree is on its change with a clean status.
 
 Every seed runs on both rebase paths: `git replay`, and the `git rebase`
 fallback (forced with `GH_DAGS_NO_REPLAY`). Both are held to the same model.
 
 **Coverage floors.** Each test counts the hard cases (parked changes checked,
-move-downs, reordering hoists, merges, scoped restacks) and fails if too few
-came up. This matters. The first version of the fuzz passed while two planted
-bugs went uncaught, because random choices almost never built parked changes or
-legal move-downs (§4).
+move-downs, reordering hoists, merges, scoped restacks, changes moved under
+clean worktrees, changes held back by dirty ones, conflicts in other
+worktrees) and fails if too few came up. This matters. The first version of
+the fuzz passed while two planted bugs went uncaught, because random choices
+almost never built parked changes or legal move-downs (§4).
 
-| Run | Full checks | Scoped | Parked | Move-downs | Hoists | Merges |
-|---|---|---|---|---|---|---|
-| default (6 seeds × 60 steps) | 75 | 19 | 18 | 12 | 10 | 7 |
-| long (40 seeds × 80 steps) | 527 | 334 | 174 | 165 | 201 | 105 |
+| Run | Full checks | Scoped | Parked | Move-downs | Hoists | Merges | Moved in worktrees | Held back |
+|---|---|---|---|---|---|---|---|---|
+| default (10 seeds × 60 steps) | 89 | 37 | 23 | 26 | 22 | 18 | 108 | 34 |
+| long (40 seeds × 80 steps) | 455 | 258 | 70 | 139 | 140 | 76 | 452 | 527 |
 
-Conflicts: 12 seeds by default (8 aborted, 2 continued); 80 in the long run
-(44 aborted, 32 continued).
+Conflicts: 12 seeds by default (5 aborted, 5 continued, 5 in other
+worktrees); 80 in the long run (32 aborted, 44 continued, 31 in other
+worktrees).
 
 ## 3. The GitHub flow against a fake GitHub (`tests/fake-gh/gh`)
 
@@ -167,6 +185,13 @@ earlier, put back).
 | No retarget-to-trunk before pushing (the real-GitHub bug) | §3 | `GitHub implicitly merged [1]` |
 | Absorb only PRs based on trunk | §3, after multi-PR merges were added | a merged change still tracked, holding others' files |
 | Unstack only what the plan rebuilds | §3, after PR-less inserts under stacks were added | GitHub's 422: a stacked PR's base can't change |
+| A worktree's branch moves without the worktree following | §2 | `c1's worktree has status "D  c0.txt"` |
+| A dirty worktree's branch is moved anyway | §2 | `c1 moved, though a dirty worktree holds it back` |
+| Clean worktrees are treated as dirty | §2 | `c1 was skipped, but no dirty worktree has it` |
+| A dirty change is skipped, but not what's stacked on it | §2 | `c3 moved, though a dirty worktree holds it back` |
+| A conflict rebase runs at home, not in the change's worktree | §2, rebase path | restack failed: git won't check out a branch another worktree has |
+| `--abort` moves refs back without their worktrees following | §2 conflicts, after trunk moves were added | `c0's worktree has status "A  main.txt"` |
+| `--continue` resumes the rebase in the wrong worktree | §2 conflicts | `--continue` failed |
 
 Two of these needed the checks themselves fixed first:
 
@@ -175,6 +200,9 @@ Two of these needed the checks themselves fixed first:
   point is now checked directly.
 - The fuzz caught the trunk-based absorb mutant only once it was steered into
   merging several PRs at once.
+- The `--abort` worktree mutant survived until conflict cases also moved
+  trunk. Before that, no branch in a worktree had moved by the time the
+  conflict stopped the restack, so abort had nothing to put back.
 
 ### What this found in the real code
 
@@ -184,6 +212,11 @@ Two of these needed the checks themselves fixed first:
   and kept tracking changes that had already landed. A two-PR merge on real
   GitHub confirmed GitHub's behavior. `sync` now decides "landed" by whether
   the merge commit is in trunk.
+- **Scoped restacks could drop a change's commits.** Suppose the layout changed
+  but wasn't restacked yet, because a worktree was dirty. `restack x --upstack`
+  then put `x` on a parent that still had `x`'s commits, and the replay dropped
+  them as already applied. The worktree fuzz found it, and it reproduced on
+  `main` with a dirty home worktree. A scoped restack now refuses that case.
 - **`--park` was silently ignored** when the deps were already in one line. It
   now says so.
 - **`sync` said nothing** when a merge unparked a change that has no PR yet. It
@@ -230,8 +263,8 @@ purpose (the mutant above).
 cargo test
 ```
 
-That's the default suite: everything above at the "default" size, about a
-minute.
+That's the default suite: everything above at the "default" size, about two
+minutes.
 
 ```bash
 cargo test --release -- --ignored
@@ -250,8 +283,8 @@ proofs. Reproduce one seed with
 - **The fake GitHub is a model.** It's calibrated against real GitHub for every
   rule listed. Merge queues, required checks, and repos that auto-delete head
   branches aren't modeled or tested.
-- **Not covered:** branches checked out in other worktrees (restack refuses
-  them), concurrent edits by other tools, and zsh completion (syntax-checked
-  only).
+- **Not covered:** concurrent edits by other tools, and zsh completion
+  (syntax-checked only). The GitHub fuzz runs without worktrees, so `sync`'s
+  handling of them has end-to-end tests only.
 - **Proofs remove the size bound only for the two core claims.** See §5.
   Everything else is tested, not proven.
