@@ -1,3 +1,5 @@
+pub mod cli;
+pub mod complete;
 pub mod git;
 pub mod github;
 pub mod layout;
