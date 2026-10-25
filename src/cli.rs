@@ -15,6 +15,7 @@ use crate::render::{Style, render, rows};
 use crate::restack::{self, Outcome, Scope};
 use crate::store::Repo;
 use crate::submit;
+use crate::worktree;
 
 /// The clap command tree, for completion.
 pub fn command() -> clap::Command {
@@ -30,6 +31,15 @@ pub fn command() -> clap::Command {
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
+}
+
+/// Where a navigation command lands.
+#[derive(clap::Args)]
+struct Dest {
+    /// Print the path of the worktree that has the change, for `cd`: another
+    /// worktree's if it's checked out there, else this one's after switching
+    #[arg(long)]
+    print_path: bool,
 }
 
 #[derive(Subcommand)]
@@ -118,22 +128,43 @@ enum Cmd {
     Up {
         #[arg(default_value_t = 1)]
         n: usize,
+        #[command(flatten)]
+        dest: Dest,
     },
     /// Switch to the change this one sits on
     Down {
         #[arg(default_value_t = 1)]
         n: usize,
+        #[command(flatten)]
+        dest: Dest,
     },
     /// Switch to the top of the current stack
-    Top,
+    Top {
+        #[command(flatten)]
+        dest: Dest,
+    },
     /// Switch to the bottom of the current stack
-    Bottom,
+    Bottom {
+        #[command(flatten)]
+        dest: Dest,
+    },
     /// Switch to the trunk branch
-    Trunk,
+    Trunk {
+        #[command(flatten)]
+        dest: Dest,
+    },
     /// Switch to the change for a PR, importing its DAG first if it isn't here
-    Checkout { pr: u64 },
+    Checkout {
+        pr: u64,
+        #[command(flatten)]
+        dest: Dest,
+    },
     /// Switch to a change (with no name: pick from the tree)
-    Switch { change: Option<String> },
+    Switch {
+        change: Option<String>,
+        #[command(flatten)]
+        dest: Dest,
+    },
     /// Print the shell code for tab completion of `gh dags`
     Completion { shell: complete::Shell },
     /// Completion candidates for a partial command line (used by `completion`)
@@ -259,27 +290,27 @@ pub fn run() -> Result<()> {
             };
             report(restack::start(&repo, &mut st, &Scope { only, no_trunk })?)
         }
-        Cmd::Up { n } => {
+        Cmd::Up { n, dest } => {
             let st = repo.load()?;
             let from = here(&repo, &st)?;
-            go(&repo, &st, nav::up(&st, from.as_deref(), n)?)
+            go(&repo, &st, nav::up(&st, from.as_deref(), n)?, dest)
         }
-        Cmd::Down { n } => {
+        Cmd::Down { n, dest } => {
             let st = repo.load()?;
             let from = current_change(&repo, &st)?;
-            go(&repo, &st, nav::down(&st, &from, n)?)
+            go(&repo, &st, nav::down(&st, &from, n)?, dest)
         }
-        Cmd::Top => {
+        Cmd::Top { dest } => {
             let st = repo.load()?;
             let from = here(&repo, &st)?;
-            go(&repo, &st, nav::top(&st, from.as_deref())?)
+            go(&repo, &st, nav::top(&st, from.as_deref())?, dest)
         }
-        Cmd::Bottom => {
+        Cmd::Bottom { dest } => {
             let st = repo.load()?;
             let from = here(&repo, &st)?;
-            go(&repo, &st, nav::bottom(&st, from.as_deref())?)
+            go(&repo, &st, nav::bottom(&st, from.as_deref())?, dest)
         }
-        Cmd::Trunk => {
+        Cmd::Trunk { dest } => {
             let st = repo.load()?;
             go(
                 &repo,
@@ -288,9 +319,10 @@ pub fn run() -> Result<()> {
                     target: None,
                     note: None,
                 },
+                dest,
             )
         }
-        Cmd::Switch { change } => {
+        Cmd::Switch { change, dest } => {
             let st = repo.load()?;
             let target = match change {
                 Some(c) => c,
@@ -300,7 +332,7 @@ pub fn run() -> Result<()> {
                 st.change(&target)?;
             }
             let target = (target != st.trunk).then_some(target);
-            go(&repo, &st, Nav { target, note: None })
+            go(&repo, &st, Nav { target, note: None }, dest)
         }
         Cmd::Submit { ready } => with_github(&repo, |st, gh| {
             submit::submit(
@@ -315,7 +347,7 @@ pub fn run() -> Result<()> {
             )
         }),
         Cmd::Sync => with_github(&repo, |st, gh| submit::sync(&repo, st, gh, &style)),
-        Cmd::Checkout { pr } => with_github(&repo, |st, gh| {
+        Cmd::Checkout { pr, dest } => with_github(&repo, |st, gh| {
             let tracked = |st: &State| {
                 st.changes
                     .iter()
@@ -338,6 +370,7 @@ pub fn run() -> Result<()> {
                     target: Some(name),
                     note: None,
                 },
+                dest,
             )
         }),
         Cmd::Import { prs, all } => with_github(&repo, |st, gh| {
@@ -391,17 +424,44 @@ fn here(repo: &Repo, st: &State) -> Result<Option<String>> {
     }
 }
 
-fn go(repo: &Repo, st: &State, nav: Nav) -> Result<()> {
+fn go(repo: &Repo, st: &State, nav: Nav, dest: Dest) -> Result<()> {
     let branch = nav.target.unwrap_or_else(|| st.trunk.clone());
-    if repo.git.current_branch().as_deref() != Some(branch.as_str()) {
-        let out = repo.git.exec(&["switch", "--quiet", &branch], None, &[])?;
-        if !out.ok {
-            bail!("couldn't switch to {branch}: {}", out.stderr);
+    let here = repo.git.toplevel()?;
+    // With --print-path, stdout is just the path, for `cd`.
+    let say = |line: &str| {
+        if dest.print_path {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
         }
-    }
-    println!("on {branch}");
+    };
+    let path = match worktree::checkout_of(&repo.git, &branch)? {
+        Some(there) if !worktree::same_path(&there, &here) => {
+            if !dest.print_path {
+                bail!(
+                    "{branch} is checked out in {}; `cd` there to work on it",
+                    there.display()
+                );
+            }
+            say(&format!("{branch} is checked out in {}", there.display()));
+            there
+        }
+        _ => {
+            if repo.git.current_branch().as_deref() != Some(branch.as_str()) {
+                let out = repo.git.exec(&["switch", "--quiet", &branch], None, &[])?;
+                if !out.ok {
+                    bail!("couldn't switch to {branch}: {}", out.stderr);
+                }
+            }
+            say(&format!("on {branch}"));
+            here
+        }
+    };
     if let Some(note) = nav.note {
-        println!("{note}");
+        say(&note);
+    }
+    if dest.print_path {
+        println!("{}", path.display());
     }
     Ok(())
 }
@@ -582,9 +642,9 @@ fn mutate(repo: &Repo, st: &mut State, cmd: Cmd) -> Result<()> {
         | Cmd::Sync
         | Cmd::Up { .. }
         | Cmd::Down { .. }
-        | Cmd::Top
-        | Cmd::Bottom
-        | Cmd::Trunk
+        | Cmd::Top { .. }
+        | Cmd::Bottom { .. }
+        | Cmd::Trunk { .. }
         | Cmd::Switch { .. }
         | Cmd::Completion { .. }
         | Cmd::Complete { .. }
