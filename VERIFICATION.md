@@ -264,7 +264,9 @@ cargo test
 ```
 
 That's the default suite: everything above at the "default" size, about two
-minutes.
+minutes. CI runs it on Linux and macOS, and against Debian's git 2.39, which
+predates the `git replay` gh-dags uses, so every restack takes the `git rebase`
+path there. A release tag also runs it before building.
 
 ```bash
 cargo test --release -- --ignored

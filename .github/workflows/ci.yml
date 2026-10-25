@@ -1,0 +1,34 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: git --version
+      - run: cargo fmt --check
+      - run: cargo test --locked
+
+  # Debian's git (2.39) predates the `git replay` gh-dags uses, so this runs
+  # everything on the `git rebase` path.
+  older-git:
+    runs-on: ubuntu-latest
+    container: rust:1-bookworm
+    steps:
+      - uses: actions/checkout@v4
+      - run: git --version
+      - run: command -v python3 || (apt-get update && apt-get install -y python3)
+      - run: cargo test --locked
