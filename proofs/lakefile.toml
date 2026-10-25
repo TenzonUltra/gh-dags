@@ -1,0 +1,5 @@
+name = "GhDags"
+defaultTargets = ["GhDags"]
+
+[[lean_lib]]
+name = "GhDags"
