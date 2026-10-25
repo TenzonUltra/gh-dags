@@ -20,7 +20,7 @@ jobs:
           components: rustfmt
       - run: git --version
       - run: cargo fmt --check
-      - run: cargo test --locked
+      - run: cargo test --locked --no-fail-fast
 
   # Debian's git (2.39) predates the `git replay` gh-dags uses, so this runs
   # everything on the `git rebase` path.
@@ -31,4 +31,4 @@ jobs:
       - uses: actions/checkout@v4
       - run: git --version
       - run: command -v python3 || (apt-get update && apt-get install -y python3)
-      - run: cargo test --locked
+      - run: cargo test --locked --no-fail-fast
