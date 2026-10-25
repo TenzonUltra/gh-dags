@@ -726,16 +726,37 @@ fn without_trunk(st: &State, deps: Vec<String>) -> Vec<String> {
 fn infer_deps(repo: &Repo, st: &State, branch: &str) -> Result<Vec<String>> {
     let git = &repo.git;
     let tip = git.branch_tip(branch)?;
+    // Tracked changes in the branch's history. One at the branch's own tip
+    // counts too: the branch just has no commits of its own yet.
     let mut found = Vec::new();
     for name in st.changes.keys() {
         let t = git.branch_tip(name)?;
-        if t != tip && git.is_ancestor(&t, &tip) {
+        if git.is_ancestor(&t, &tip) {
             found.push((name.clone(), t));
         }
     }
-    Ok(found
+    // The newest of them: none below another one's tip.
+    let newest: Vec<(String, String)> = found
         .iter()
         .filter(|(_, t)| !found.iter().any(|(_, u)| u != t && git.is_ancestor(t, u)))
-        .map(|(n, _)| n.clone())
-        .collect())
+        .cloned()
+        .collect();
+    // Changes on the same commit: take the one stacked highest. If the
+    // layout doesn't order them, history can't say which the branch is on.
+    let deps: Vec<&(String, String)> = newest
+        .iter()
+        .filter(|(n, t)| {
+            !newest
+                .iter()
+                .any(|(m, u)| u == t && m != n && st.phys_ancestors(m).contains(n))
+        })
+        .collect();
+    for (n, t) in &deps {
+        if let Some((m, _)) = deps.iter().find(|(m, u)| u == t && m != n) {
+            bail!(
+                "{n} and {m} point at the same commit, so {branch} could be on either; pass --on"
+            );
+        }
+    }
+    Ok(deps.into_iter().map(|(n, _)| n.clone()).collect())
 }

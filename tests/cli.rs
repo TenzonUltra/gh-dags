@@ -411,6 +411,28 @@ fn new_leaves_nothing_behind_when_its_commit_fails() {
 }
 
 #[test]
+fn track_puts_a_branch_without_commits_on_the_change_it_points_at() {
+    let sb = Sandbox::new();
+    sb.ok(&["new", "a"]);
+    sb.commit_file("a", "a\n", "a");
+    sb.git(&["branch", "b", "a"]);
+    let out = sb.ok(&["track", "b"]);
+    assert!(out.contains("layout: b on a"), "{out}");
+    assert!(sb.ok(&["restack"]).contains("already in place"));
+
+    // Two changes on one commit that the layout doesn't order: ask.
+    sb.ok(&["new", "x", "--on", "main", "--no-checkout"]);
+    sb.ok(&["new", "y", "--on", "main", "--no-checkout"]);
+    sb.git(&["checkout", "-q", "-b", "z", "main"]);
+    sb.commit_file("z", "z\n", "z");
+    let (ok, out) = sb.dags(&["track", "z"]);
+    assert!(
+        !ok && out.contains("point at the same commit, so z could be on either; pass --on"),
+        "{out}"
+    );
+}
+
+#[test]
 fn land_hoists_what_a_change_needs() {
     let sb = Sandbox::new();
     for name in ["a", "b"] {

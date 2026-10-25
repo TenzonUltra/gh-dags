@@ -276,7 +276,7 @@ the full state for scripts.
 |---|---|
 | `init [--trunk main] [--remote origin]` | Start tracking in this repo. Enables `rerere`. |
 | `new <name> [--on a,b] [--park] [-m msg]` | Create and check out a change. Defaults to `--on <current branch>`. |
-| `track <branch> [--on a,b]` / `untrack <change>` | Adopt an existing branch, or forget one. |
+| `track <branch> [--on a,b]` / `untrack <change>` | Adopt an existing branch, or forget one. Without `--on`, the deps are the newest tracked changes in its history, one at its own tip included. If several share a commit the layout doesn't order, it asks for `--on`. |
 | `link <change> <dep>…` / `unlink …` | Edit DAG edges. |
 | `move <change> --onto <target>` | Manual layout control. Validated against the invariant. |
 | `view` (default) | Tree view, as above. |
