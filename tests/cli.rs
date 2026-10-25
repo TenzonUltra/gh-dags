@@ -226,6 +226,7 @@ fn a_sum_that_cant_be_built_holds_back_only_its_parked_changes() {
     for line in [
         "opened #1 a → main",
         "opened #2 b → main",
+        "kept c local: it's parked on a ⊕ b",
     ] {
         assert!(out.contains(line), "missing {line:?} in:\n{out}");
     }

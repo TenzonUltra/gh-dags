@@ -207,6 +207,34 @@ fn restacked(r: restack::Report, st: &State, what: &str) -> Result<()> {
     Ok(())
 }
 
+/// Parked changes don't get PRs. Say so, rather than skip them silently.
+fn say_what_stays_local(st: &State) -> Result<()> {
+    let order = st.topo_order()?;
+    for s in &st.stacks {
+        let Base::Sum(ms) = &s.base else {
+            continue;
+        };
+        let under = st.subtree(&s.changes[0]);
+        let kept: Vec<&String> = order.iter().filter(|c| under.contains(*c)).collect();
+        let names = kept
+            .iter()
+            .map(|c| c.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (pronoun, get, them) = if kept.len() == 1 {
+            ("it's", "gets a PR", "it")
+        } else {
+            ("they're", "get PRs", "them")
+        };
+        println!(
+            "kept {names} local: {pronoun} parked on {}, and {get} once all but one of those \
+             have landed (`gh dags move` stacks {them} sooner)",
+            ms.join(" ⊕ ")
+        );
+    }
+    Ok(())
+}
+
 fn ensure_restacked(repo: &Repo, st: &mut State) -> Result<()> {
     if restack::needs_restack(&repo.git, st, true)? {
         match restack::start(repo, st, &restack::Scope::default())? {
@@ -224,6 +252,9 @@ fn ensure_restacked(repo: &Repo, st: &mut State) -> Result<()> {
 pub fn submit(repo: &Repo, st: &mut State, gh: &Gh, opts: Opts, style: &Style) -> Result<()> {
     let git = &repo.git;
     ensure_restacked(repo, st)?;
+    if opts.create {
+        say_what_stays_local(st)?;
+    }
     let order: Vec<String> = st
         .topo_order()?
         .into_iter()

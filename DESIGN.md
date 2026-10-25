@@ -85,7 +85,8 @@ independent of each other. One branch cannot have two bases, so either:
    can't be built, which tells you they aren't really independent. A restack
    then holds `C` back (with what's on it), names the conflicting files, and
    suggests stacking `B` on `A` to resolve the conflict once. `submit` and
-   `sync` carry on without it, since it isn't submitted.
+   `sync` carry on without it, since it isn't submitted, and `submit` says
+   which changes it keeps local.
 
 The sum commit is built without touching the worktree:
 `git merge-tree --write-tree A B` followed by `git commit-tree -p A -p B`. Its
