@@ -9,6 +9,7 @@ use anyhow::{Result, bail};
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::git::Git;
 use crate::github::{Gh, MergeStatus, PrInfo, RemoteStack, status_of};
 use crate::layout;
 use crate::model::{Base, State};
@@ -486,6 +487,7 @@ pub fn sync(repo: &Repo, st: &mut State, gh: &Gh, style: &Style) -> Result<()> {
     // Take remote rewrites (e.g. GitHub's rebase after a merge) when we
     // haven't changed the branch since our last push.
     let mut diverged = Vec::new();
+    let mut held = Vec::new();
     for name in st.topo_order()? {
         let Some(pushed) = st.changes[&name].pushed.clone() else {
             continue;
@@ -499,6 +501,12 @@ pub fn sync(repo: &Repo, st: &mut State, gh: &Gh, style: &Style) -> Result<()> {
         }
         if local != pushed {
             diverged.push(name);
+            continue;
+        }
+        if let Some(path) = worktree::checkout_of(git, &name)?
+            && let Some(why) = worktree::blocker(git, &name, &path)
+        {
+            held.push(why);
             continue;
         }
         worktree::move_branch(git, &name, &remote, &local)?;
@@ -521,6 +529,12 @@ pub fn sync(repo: &Repo, st: &mut State, gh: &Gh, style: &Style) -> Result<()> {
              (e.g. rebase onto {}/<branch>), then run `gh dags submit`",
             diverged.join(", "),
             st.remote
+        );
+    }
+    if !held.is_empty() {
+        bail!(
+            "these changed on GitHub, but can't be updated here yet:\n  {}\nthen run `gh dags sync` again",
+            held.join("\n  ")
         );
     }
 
@@ -552,29 +566,41 @@ pub fn sync(repo: &Repo, st: &mut State, gh: &Gh, style: &Style) -> Result<()> {
 /// Bring local trunk up to the remote's, and step off a branch that merged.
 fn fast_forward_trunk(repo: &Repo, st: &State, merged: &[String]) -> Result<()> {
     let git = &repo.git;
-    let current = git.current_branch();
     let (Some(remote), Some(local)) = (
         git.resolve(&format!("refs/remotes/{}/{}", st.remote, st.trunk)),
         git.resolve(&format!("refs/heads/{}", st.trunk)),
     ) else {
         return Ok(());
     };
-    let clean = git.is_clean()?;
+    let trunk_at = worktree::checkout_of(git, &st.trunk)?;
     if local != remote && git.is_ancestor(&local, &remote) {
-        if current.as_deref() == Some(st.trunk.as_str()) {
-            if clean {
-                git.run(&["merge", "--ff-only", "--quiet", &remote])?;
-            }
-        } else {
-            git.update_branch(&st.trunk, &remote, &local)?;
+        match &trunk_at {
+            None => git.update_branch(&st.trunk, &remote, &local)?,
+            // Restacks build on the remote trunk anyway, so a worktree that
+            // can't take the fast-forward just keeps its trunk for now.
+            Some(path) => match worktree::blocker(git, &st.trunk, path) {
+                None => {
+                    Git::new(path).run(&["merge", "--ff-only", "--quiet", &remote])?;
+                }
+                Some(why) => println!("note: {} wasn't fast-forwarded: {why}", st.trunk),
+            },
         }
     }
-    if let Some(c) = current
+    if let Some(c) = git.current_branch()
         && merged.contains(&c)
-        && clean
+        && git.is_clean()?
     {
-        git.run(&["checkout", "--quiet", &st.trunk])?;
-        println!("{c} merged, so you're now on {}", st.trunk);
+        match trunk_at {
+            Some(path) if !worktree::same_path(&path, &git.toplevel()?) => println!(
+                "{c} merged; switch off it ({} is checked out in {})",
+                st.trunk,
+                path.display()
+            ),
+            _ => {
+                git.run(&["checkout", "--quiet", &st.trunk])?;
+                println!("{c} merged, so you're now on {}", st.trunk);
+            }
+        }
     }
     Ok(())
 }
