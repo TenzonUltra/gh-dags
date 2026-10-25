@@ -169,7 +169,11 @@ parent.
   branch. A journal (`restack.json`) records the queue and every branch's
   original tip. `restack --continue` resumes. `restack --abort` restores every
   ref.
-- Branches checked out in *other* worktrees are refused up front.
+- **Other worktrees.** A change checked out in another worktree is rewritten
+  there. On the fast path that worktree steps off the branch, the ref moves,
+  and it steps back on, so its files follow. On a conflict, `git rebase` runs
+  in that worktree and the journal records which one, so `--continue` and
+  `--abort` work from any worktree. Those worktrees have to be clean.
 
 ## 6. GitHub projection
 

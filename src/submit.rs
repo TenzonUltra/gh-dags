@@ -15,6 +15,7 @@ use crate::model::{Base, State};
 use crate::render::Style;
 use crate::restack::{self, Outcome};
 use crate::store::Repo;
+use crate::worktree;
 
 const START: &str = "<!-- gh-dags:start -->";
 const END: &str = "<!-- gh-dags:end -->";
@@ -187,9 +188,10 @@ fn ensure_restacked(repo: &Repo, st: &mut State) -> Result<()> {
     if restack::needs_restack(&repo.git, st)? {
         match restack::start(repo, st, &restack::Scope::default())? {
             Outcome::Done(r) => println!("restacked {}", r.moved.join(", ")),
-            Outcome::Conflict(name) => bail!(
-                "restack stopped on a conflict in {name:?}; resolve it and run \
-                 `gh dags restack --continue`, then submit again"
+            Outcome::Conflict { change, worktree } => bail!(
+                "restack stopped on a conflict in {}; resolve it and run \
+                 `gh dags restack --continue`, then submit again",
+                restack::conflict_place(&change, &worktree)
             ),
         }
     }
@@ -483,7 +485,7 @@ pub fn sync(repo: &Repo, st: &mut State, gh: &Gh, style: &Style) -> Result<()> {
             diverged.push(name);
             continue;
         }
-        restack::move_branch(git, &name, &remote, &local)?;
+        worktree::move_branch(git, &name, &remote, &local)?;
         let onto = restack::parent_tip(git, st, &name)?;
         let fork = if git.is_ancestor(&onto, &remote) {
             Some(onto)
@@ -509,8 +511,9 @@ pub fn sync(repo: &Repo, st: &mut State, gh: &Gh, style: &Style) -> Result<()> {
     if restack::needs_restack(git, st)? {
         match restack::start(repo, st, &restack::Scope::default())? {
             Outcome::Done(r) => println!("restacked {}", r.moved.join(", ")),
-            Outcome::Conflict(name) => bail!(
-                "restack stopped on a conflict in {name:?}; resolve it and run `gh dags restack --continue`"
+            Outcome::Conflict { change, worktree } => bail!(
+                "restack stopped on a conflict in {}; resolve it and run `gh dags restack --continue`",
+                restack::conflict_place(&change, &worktree)
             ),
         }
     }

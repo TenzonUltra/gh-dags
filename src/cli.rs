@@ -625,9 +625,10 @@ fn report(outcome: Outcome) -> Result<()> {
             }
             Ok(())
         }
-        Outcome::Conflict(name) => bail!(
-            "restack stopped on a conflict in {name:?}. Resolve it, `git add` the files, then run \
-             `gh dags restack --continue` (or `--abort` to undo everything)"
+        Outcome::Conflict { change, worktree } => bail!(
+            "restack stopped on a conflict in {}. Resolve it, `git add` the files, then run \
+             `gh dags restack --continue` (or `--abort` to undo everything)",
+            restack::conflict_place(&change, &worktree)
         ),
     }
 }

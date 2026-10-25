@@ -229,6 +229,68 @@ fn conflicts_stop_and_continue_or_abort() {
 }
 
 #[test]
+fn restack_carries_other_worktrees_along() {
+    for no_replay in [false, true] {
+        let mut sb = Sandbox::new();
+        if no_replay {
+            sb.env.push(("GH_DAGS_NO_REPLAY".into(), "1".into()));
+        }
+        sb.ok(&["new", "a"]);
+        sb.commit_file("a", "a\n", "a");
+        sb.ok(&["new", "b"]);
+        sb.commit_file("b", "b\n", "b");
+        sb.git(&["checkout", "-q", "a"]);
+        let wt = sb.worktree("wt-b", "b");
+
+        sb.commit_file("a2", "a2\n", "a2");
+        let out = sb.ok(&["restack"]);
+        assert!(out.contains("restacked b"), "{out}");
+        assert_eq!(sb.own_commits("a", "b"), ["b"]);
+        assert_eq!(wt.branch(), "b");
+        assert_eq!(wt.status(), "", "the worktree follows its branch");
+        assert_eq!(fs::read_to_string(wt.work.join("a2")).unwrap(), "a2\n");
+        assert_eq!(sb.branch(), "a");
+    }
+}
+
+#[test]
+fn conflicts_in_another_worktree_are_resolved_there() {
+    for finish in ["continue", "abort"] {
+        let sb = Sandbox::new();
+        sb.ok(&["new", "a"]);
+        sb.commit_file("f", "one\n", "a");
+        sb.ok(&["new", "b"]);
+        sb.commit_file("f", "one\ntwo\n", "b");
+        let b_before = sb.tip("b");
+        sb.git(&["checkout", "-q", "a"]);
+        let wt = sb.worktree("wt-b", "b");
+
+        sb.commit_file("f", "uno\n", "a edit");
+        let (ok, out) = sb.dags(&["restack"]);
+        assert!(
+            !ok && out.contains("conflict in \"b\" (checked out in ") && out.contains("wt-b)"),
+            "{out}"
+        );
+        // Either worktree can finish it; `a` goes back where it started.
+        if finish == "continue" {
+            fs::write(wt.work.join("f"), "uno\ntwo\n").unwrap();
+            wt.git(&["add", "f"]);
+            let out = wt.ok(&["restack", "--continue"]);
+            assert!(out.contains("restacked b"), "{out}");
+            assert_eq!(sb.show("b", "f"), "uno\ntwo");
+            assert_eq!(sb.own_commits("a", "b"), ["b"]);
+        } else {
+            sb.ok(&["restack", "--abort"]);
+            assert_eq!(sb.tip("b"), b_before);
+        }
+        assert_eq!(wt.branch(), "b");
+        assert_eq!(wt.status(), "");
+        assert_eq!(sb.branch(), "a");
+        assert_eq!(sb.status(), "");
+    }
+}
+
+#[test]
 fn land_hoists_what_a_change_needs() {
     let sb = Sandbox::new();
     for name in ["a", "b"] {
