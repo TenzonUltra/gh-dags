@@ -1,0 +1,294 @@
+#!/usr/bin/env python3
+"""A stand-in for the GitHub CLI in gh-dags' end-to-end tests.
+
+It keeps PRs and stacks in a JSON file ($FAKE_GH_DB) and performs merges on a
+local bare repository ($FAKE_GH_ORIGIN), imitating the GitHub behaviour gh-dags
+relies on: a stack needs at least two PRs, each PR's base must be the head of
+the one below, a stacked PR's base can't be changed, and merging the bottom of
+a stack squash-merges it and rebases the rest onto trunk.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+from urllib.parse import parse_qs, urlsplit
+
+DB = os.environ["FAKE_GH_DB"]
+ORIGIN = os.environ["FAKE_GH_ORIGIN"]
+OWNER, NAME = "acme", "widgets"
+TRUNK = "main"
+
+
+def load():
+    try:
+        with open(DB) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {"next_pr": 1, "next_stack": 1, "prs": {}, "stacks": {}, "calls": []}
+
+
+def save(db):
+    with open(DB, "w") as f:
+        json.dump(db, f, indent=2)
+
+
+def fail(status, message):
+    print(json.dumps({"message": message}))
+    print("gh: %s (HTTP %d)" % (message, status), file=sys.stderr)
+    sys.exit(1)
+
+
+def git(*args):
+    out = subprocess.run(["git", "--git-dir", ORIGIN] + list(args), capture_output=True, text=True)
+    if out.returncode != 0:
+        raise SystemExit("fake gh: git %s failed: %s" % (" ".join(args), out.stderr))
+    return out.stdout.strip()
+
+
+def tip(branch):
+    return git("rev-parse", "refs/heads/" + branch)
+
+
+def branch_exists(branch):
+    return subprocess.run(
+        ["git", "--git-dir", ORIGIN, "rev-parse", "--verify", "--quiet", "refs/heads/" + branch],
+        capture_output=True,
+    ).returncode == 0
+
+
+def pr(db, number):
+    p = db["prs"].get(str(number))
+    if p is None:
+        fail(422, "pull request #%s doesn't exist" % number)
+    return p
+
+
+def stack_of(db, number):
+    for s in db["stacks"].values():
+        if s["open"] and number in s["prs"]:
+            return s
+    return None
+
+
+def stack_json(db, s):
+    return {
+        "number": s["number"],
+        "base": {"ref": s["base"]},
+        "open": s["open"],
+        "pull_requests": [
+            {"number": n, "state": pr(db, n)["state"], "merged": pr(db, n)["merged"]} for n in s["prs"]
+        ],
+    }
+
+
+def validate_chain(db, stack, new):
+    if stack is None and len(new) < 2:
+        fail(422, "a stack needs at least two pull requests")
+    head = None if stack is None else pr(db, stack["prs"][-1])["head"]
+    for n in new:
+        p = pr(db, n)
+        if p["state"] != "open":
+            fail(422, "#%d isn't open" % n)
+        if stack_of(db, n) is not None:
+            fail(422, "#%d is already in a stack" % n)
+        if head is not None and p["base"] != head:
+            fail(422, "#%d must be based on %s, not %s" % (n, head, p["base"]))
+        head = p["head"]
+
+
+def squash(db, p):
+    tree = git("merge-tree", "--write-tree", "refs/heads/" + TRUNK, "refs/heads/" + p["head"]).splitlines()[0]
+    commit = git("commit-tree", tree, "-p", tip(TRUNK), "-m", "%s (#%d)" % (p["title"], p["number"]))
+    git("update-ref", "refs/heads/" + TRUNK, commit)
+    p["merged"], p["state"] = True, "closed"
+    p["merge_commit"] = commit
+
+
+def merge(db, number):
+    s = stack_of(db, number)
+    if s is None:
+        prefix = [number]
+    else:
+        open_prs = [n for n in s["prs"] if pr(db, n)["state"] == "open"]
+        prefix = open_prs[: open_prs.index(number) + 1]
+    if pr(db, prefix[0])["base"] != TRUNK:
+        fail(405, "#%d isn't based on %s" % (prefix[0], TRUNK))
+    if any(pr(db, n)["draft"] for n in prefix):
+        # The async merge API's failure shape, and gh's bare status line.
+        print(json.dumps({"status": "failed", "details": {"message": "Pull request is in draft."}}))
+        print("gh: HTTP 400", file=sys.stderr)
+        sys.exit(1)
+    old_base = tip(pr(db, prefix[-1])["head"])
+    for n in prefix:
+        squash(db, pr(db, n))
+    if s is None:
+        return
+    # Rebase what's left of the stack onto trunk, like GitHub does.
+    new_base = tip(TRUNK)
+    rest = [n for n in s["prs"] if pr(db, n)["state"] == "open"]
+    for i, n in enumerate(rest):
+        p = pr(db, n)
+        head_ref = "refs/heads/" + p["head"]
+        before = tip(p["head"])
+        out = git("replay", "--ref-action=print", "--onto=" + new_base, "%s..%s" % (old_base, head_ref))
+        for line in out.splitlines():
+            _, ref, new = line.split()[:3]
+            if ref == head_ref:
+                git("update-ref", head_ref, new, before)
+        if i == 0:
+            p["base"] = TRUNK
+        old_base, new_base = before, tip(p["head"])
+
+
+def is_ancestor(a, b):
+    return subprocess.run(
+        ["git", "--git-dir", ORIGIN, "merge-base", "--is-ancestor", a, b], capture_output=True
+    ).returncode == 0
+
+
+def implicit_merges(db):
+    """GitHub marks an open PR merged once its base branch contains its head."""
+    for p in db["prs"].values():
+        if p["state"] == "open" and branch_exists(p["base"]) and is_ancestor(tip(p["head"]), tip(p["base"])):
+            p["merged"], p["state"] = True, "closed"
+            db.setdefault("implicitly_merged", []).append(p["number"])
+
+
+def api(method, path, body):
+    url = urlsplit(path)
+    parts = url.path.split("/")
+    query = parse_qs(url.query)
+    if parts[:3] != ["repos", OWNER, NAME]:
+        fail(404, "Not Found")
+    rest = parts[3:]
+    db = load()
+    implicit_merges(db)
+    db["calls"].append("%s %s" % (method, "/".join(rest)))
+    out = None
+    if rest == ["pulls"] and method == "GET":
+        head = query["head"][0].split(":", 1)[1]
+        out = [
+            {"number": p["number"]}
+            for p in db["prs"].values()
+            if p["head"] == head and p["state"] == "open"
+        ]
+    elif rest == ["pulls"] and method == "POST":
+        for b in (body["head"], body["base"]):
+            if not branch_exists(b):
+                fail(422, "branch %s doesn't exist" % b)
+        if any(p["head"] == body["head"] and p["state"] == "open" for p in db["prs"].values()):
+            fail(422, "a pull request already exists for %s" % body["head"])
+        n = db["next_pr"]
+        db["next_pr"] += 1
+        db["prs"][str(n)] = {
+            "number": n,
+            "head": body["head"],
+            "base": body["base"],
+            "title": body["title"],
+            "body": body.get("body", ""),
+            "draft": body.get("draft", False),
+            "state": "open",
+            "merged": False,
+        }
+        out = {"number": n, "html_url": "https://github.com/%s/%s/pull/%d" % (OWNER, NAME, n)}
+    elif len(rest) == 2 and rest[0] == "pulls" and method == "PATCH":
+        p = pr(db, rest[1])
+        if "base" in body and body["base"] != p["base"] and stack_of(db, p["number"]):
+            fail(422, "the base of a stacked pull request can't be changed")
+        for k in ("base", "body", "title"):
+            if k in body:
+                p[k] = body[k]
+        out = {"number": p["number"]}
+    elif rest == ["stacks"] and method == "GET":
+        out = [stack_json(db, s) for s in db["stacks"].values()]
+    elif rest == ["stacks"] and method == "POST":
+        prs = body["pull_requests"]
+        validate_chain(db, None, prs)
+        n = db["next_stack"]
+        db["next_stack"] += 1
+        s = {"number": n, "base": pr(db, prs[0])["base"], "prs": prs, "open": True}
+        db["stacks"][str(n)] = s
+        out = stack_json(db, s)
+    elif len(rest) == 3 and rest[0] == "stacks" and method == "POST":
+        s = db["stacks"].get(rest[1])
+        if s is None or not s["open"]:
+            fail(404, "Not Found")
+        if rest[2] == "add":
+            validate_chain(db, s, body["pull_requests"])
+            s["prs"] += body["pull_requests"]
+            out = stack_json(db, s)
+        elif rest[2] == "unstack":
+            s["prs"] = [n for n in s["prs"] if pr(db, n)["merged"]]
+            if s["prs"]:
+                out = stack_json(db, s)
+            else:
+                s["open"] = False
+    elif len(rest) == 3 and rest[0] == "pulls" and rest[2] == "merge-async" and method == "PUT":
+        merge(db, int(rest[1]))
+        out = {"status": "merged", "details": {}}
+    else:
+        fail(404, "Not Found")
+    save(db)
+    if out is not None:
+        print(json.dumps(out))
+
+
+def graphql(query):
+    db = load()
+    implicit_merges(db)
+    ready = re.search(r'markPullRequestReadyForReview\(input: \{pullRequestId: "PR_(\d+)"\}\)', query)
+    if ready:
+        pr(db, ready.group(1))["draft"] = False
+        db["calls"].append("READY #%s" % ready.group(1))
+        save(db)
+        print(json.dumps({"data": {"markPullRequestReadyForReview": {"clientMutationId": None}}}))
+        return
+    save(db)
+    repo = {}
+    for n in re.findall(r"p(\d+): pullRequest", query):
+        p = db["prs"].get(n)
+        if p is None:
+            repo["p" + n] = None
+            continue
+        state = "MERGED" if p["merged"] else ("CLOSED" if p["state"] == "closed" else "OPEN")
+        repo["p" + n] = {
+            "id": "PR_" + n,
+            "number": p["number"],
+            "state": state,
+            "isDraft": p["draft"],
+            "baseRefName": p["base"],
+            "mergeCommit": {"oid": p["merge_commit"]} if p.get("merge_commit") else None,
+            "body": p["body"],
+            "url": "https://github.com/%s/%s/pull/%s" % (OWNER, NAME, n),
+        }
+    print(json.dumps({"data": {"repository": repo}}))
+
+
+def main(argv):
+    if argv[:1] == ["dags"]:
+        # Like gh: run the extension with the remaining arguments.
+        os.execv(os.environ["FAKE_GH_DAGS"], ["gh-dags"] + argv[1:])
+    if argv[:3] == ["completion", "-s", "fish"]:
+        # gh's real fish script starts by erasing every gh completion.
+        print("complete -c gh -e")
+        print("complete -c gh -n '__fish_use_subcommand' -f -a 'pr repo'")
+        return
+    if argv[:3] == ["completion", "-s", "bash"]:
+        print("__start_gh() { COMPREPLY=(pr repo); }")
+        print("complete -o default -F __start_gh gh")
+        return
+    if argv[:2] == ["repo", "view"]:
+        print("%s/%s" % (OWNER, NAME))
+    elif argv[:2] == ["api", "graphql"]:
+        graphql(argv[argv.index("-f") + 1].split("=", 1)[1])
+    elif argv[:1] == ["api"]:
+        method = argv[argv.index("--method") + 1]
+        path = [a for a in argv[1:] if not a.startswith("-") and a not in (method,)][0]
+        body = json.load(sys.stdin) if "--input" in argv else None
+        api(method, path, body)
+    else:
+        fail(400, "fake gh doesn't support: %s" % " ".join(argv))
+
+
+main(sys.argv[1:])
