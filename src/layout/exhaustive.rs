@@ -250,6 +250,7 @@ fn check(b: &State, op: &Op, result: &Result<bool>, a: &State) {
             assert_eq!(a.parent(c).as_ref(), Some(onto), "{}", ctx());
         }
         Op::Hoist(x) => {
+            matches_proven_model(b, x, a).unwrap_or_else(|e| panic!("{e}{}", ctx()));
             other_deps_unchanged(b, a, &[]);
             assert_eq!(*changed, layout_key(a) != layout_key(b), "{}", ctx());
             assert_eq!(
@@ -298,6 +299,87 @@ fn check(b: &State, op: &Op, result: &Result<bool>, a: &State) {
             }
         }
     }
+}
+
+/// The hoist that `proofs/GhDags/Hoist.lean` proves correct, checked against
+/// what the code did. With `P` the root path of `x` and
+/// `C = P.filter(need) ++ P.filter(!need)`:
+///
+/// * path nodes sit on their predecessor in `C` (the first on trunk);
+/// * `x`'s stack successor sits on the last node of `C`;
+/// * each other branch hanging off `P` is re-anchored onto a node of `P` at or
+///   after (in `C`) everything that branch needs from `P`;
+/// * every other change keeps its parent.
+///
+/// Where this holds, `newPar_inv`, `newPar_exact` and `newPar_acyclic` apply
+/// to the code's actual result. Sums are outside the model, so changes
+/// sitting on one are skipped.
+fn matches_proven_model(b: &State, x: &str, a: &State) -> std::result::Result<(), String> {
+    let path = b.path(x);
+    let need: BTreeSet<String> = b
+        .logical_ancestors(x)
+        .into_iter()
+        .chain([x.to_string()])
+        .collect();
+    let chain: Vec<String> = path
+        .iter()
+        .filter(|v| need.contains(*v))
+        .chain(path.iter().filter(|v| !need.contains(*v)))
+        .cloned()
+        .collect();
+    let pos = |v: &str| chain.iter().position(|c| c == v);
+    let (si, p) = b.locate(x).unwrap();
+    let cont = b.stacks[si].changes.get(p + 1).cloned();
+    for v in b.changes.keys() {
+        let (before, after) = (b.parent(v).unwrap(), a.parent(v).unwrap());
+        if matches!(before, Base::Sum(_)) || matches!(after, Base::Sum(_)) {
+            continue;
+        }
+        let expected = if let Some(i) = pos(v) {
+            Some(if i == 0 {
+                Base::Trunk
+            } else {
+                Base::Change(chain[i - 1].clone())
+            })
+        } else if cont.as_deref() == Some(v.as_str()) {
+            Some(Base::Change(chain.last().unwrap().clone()))
+        } else if matches!(&before, Base::Change(q) if path.contains(q)) {
+            // A side root: any anchor satisfying the proven rule is fine.
+            let Base::Change(anchor) = &after else {
+                return Err(format!(
+                    "side root {v} isn't anchored on a change: {after:?}"
+                ));
+            };
+            let Some(at) = pos(anchor) else {
+                return Err(format!(
+                    "side root {v} is anchored off the path, on {anchor}"
+                ));
+            };
+            let needs: BTreeSet<String> = b
+                .subtree(v)
+                .iter()
+                .flat_map(|w| b.logical_ancestors(w))
+                .collect();
+            for d in needs.iter().filter(|d| path.contains(*d)) {
+                if pos(d).unwrap() > at {
+                    return Err(format!(
+                        "side root {v} is anchored on {anchor}, below {d}, which it needs"
+                    ));
+                }
+            }
+            None
+        } else {
+            Some(before.clone())
+        };
+        if let Some(e) = expected
+            && e != after
+        {
+            return Err(format!(
+                "{v} sits on {after:?}, but the proven model puts it on {e:?}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Breadth-first over distinct states; returns (states, transitions).
