@@ -475,6 +475,79 @@ fn track_puts_a_branch_without_commits_on_the_change_it_points_at() {
 }
 
 #[test]
+fn concurrent_commands_run_one_at_a_time() {
+    let sb = Sandbox::new();
+    sb.git(&["checkout", "-q", "--detach"]);
+    let other = sb.worktree("wt-other", "main");
+    // Pairs of `new` from two worktrees at once: neither may lose the other's
+    // change by writing back a state it read before the other's write.
+    let spawn = |dir: &std::path::Path, name: String| {
+        command(env!("CARGO_BIN_EXE_gh-dags"), dir, sb._tmp.path())
+            .args(["new", &name, "--on", "main", "--no-checkout"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    for i in 0..15 {
+        let x = spawn(&sb.work, format!("x{i}"));
+        let y = spawn(&other.work, format!("y{i}"));
+        let (x, y) = (x.wait_with_output().unwrap(), y.wait_with_output().unwrap());
+        assert!(x.status.success() && y.status.success(), "{x:?}\n{y:?}");
+    }
+    let view = sb.ok(&["view"]);
+    for i in 0..15 {
+        for name in [format!("x{i}"), format!("y{i}")] {
+            assert!(
+                view.contains(&format!("○ {name}")),
+                "{name} was lost:\n{view}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_held_lock_makes_others_wait_and_goes_with_its_holder() {
+    use std::io::{BufRead, BufReader};
+    let mut sb = Sandbox::new();
+    sb.env.push(("GH_DAGS_LOCK_WAIT".into(), "1".into()));
+    let lock = sb.work.join(".git/gh-dags/lock");
+    assert_eq!(
+        fs::read_to_string(&lock).unwrap(),
+        "",
+        "a finished command clears it"
+    );
+    // Another process holds the lock, as a running gh-dags would.
+    let mut holder = Command::new("python3")
+        .args([
+            "-c",
+            "import fcntl, sys, time\nf = open(sys.argv[1], 'a')\n\
+             fcntl.flock(f, fcntl.LOCK_EX)\nprint('locked', flush=True)\ntime.sleep(60)",
+            lock.to_str().unwrap(),
+        ])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(holder.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert_eq!(line.trim(), "locked");
+
+    let (ok, out) = sb.dags(&["new", "a"]);
+    assert!(
+        !ok && out.contains("waiting for another gh-dags command to finish")
+            && out.contains("is still running; try again once it's done"),
+        "{out}"
+    );
+    sb.ok(&["view"]);
+    // A killed holder takes the lock with it.
+    holder.kill().unwrap();
+    holder.wait().unwrap();
+    sb.ok(&["new", "a"]);
+}
+
+#[test]
 fn land_hoists_what_a_change_needs() {
     let sb = Sandbox::new();
     for name in ["a", "b"] {
