@@ -102,6 +102,23 @@ impl Sandbox {
         sb
     }
 
+    /// A linked worktree of this clone with `branch` checked out, as a
+    /// sandbox that runs git and gh-dags there.
+    pub fn worktree(&self, name: &str, branch: &str) -> Sandbox {
+        let work = self._tmp.path().join(name);
+        self.git(&["worktree", "add", "-q", work.to_str().unwrap(), branch]);
+        Sandbox {
+            _tmp: self._tmp.clone(),
+            work,
+            env: self.env.clone(),
+        }
+    }
+
+    /// `git status --porcelain`: empty when clean.
+    pub fn status(&self) -> String {
+        self.git(&["status", "--porcelain"])
+    }
+
     pub fn git_in(&self, dir: &Path, args: &[&str]) -> String {
         let out = command("git", dir, self._tmp.path())
             .args(args)

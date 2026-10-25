@@ -19,6 +19,12 @@ pub struct Output {
     pub stderr: String,
 }
 
+pub struct Worktree {
+    pub path: PathBuf,
+    /// The branch checked out there, if it's on one.
+    pub branch: Option<String>,
+}
+
 /// Result of replaying a change's own commits onto a new base.
 pub enum Replay {
     /// The new tip.
@@ -162,21 +168,47 @@ impl Git {
         })
     }
 
-    /// Branch → worktree path, for every branch checked out somewhere.
-    pub fn worktree_branches(&self) -> Result<BTreeMap<String, PathBuf>> {
+    /// The git operation stopped part-way here (a rebase, merge, cherry-pick
+    /// or revert), if any.
+    pub fn operation(&self) -> Option<&'static str> {
+        const MARKERS: [(&str, &str); 6] = [
+            ("rebase-merge", "rebase"),
+            ("rebase-apply", "rebase"),
+            ("MERGE_HEAD", "merge"),
+            ("CHERRY_PICK_HEAD", "cherry-pick"),
+            ("REVERT_HEAD", "revert"),
+            ("sequencer", "cherry-pick"),
+        ];
+        let mut args = vec!["rev-parse", "--path-format=absolute"];
+        for (marker, _) in MARKERS {
+            args.extend(["--git-path", marker]);
+        }
+        let out = self.run(&args).ok()?;
+        out.lines()
+            .zip(MARKERS)
+            .find(|(path, _)| Path::new(path).exists())
+            .map(|(_, (_, op))| op)
+    }
+
+    /// Every worktree of the repository, this one included.
+    pub fn worktrees(&self) -> Result<Vec<Worktree>> {
         let out = self.run(&["worktree", "list", "--porcelain"])?;
-        let mut map = BTreeMap::new();
-        let mut path = None;
-        for line in out.lines() {
-            if let Some(p) = line.strip_prefix("worktree ") {
-                path = Some(PathBuf::from(p));
-            } else if let Some(b) = line.strip_prefix("branch refs/heads/")
-                && let Some(p) = &path
-            {
-                map.insert(b.to_string(), p.clone());
+        let mut list = Vec::new();
+        for entry in out.split("\n\n") {
+            let mut path = None;
+            let mut branch = None;
+            for line in entry.lines() {
+                if let Some(p) = line.strip_prefix("worktree ") {
+                    path = Some(PathBuf::from(p));
+                } else if let Some(b) = line.strip_prefix("branch refs/heads/") {
+                    branch = Some(b.to_string());
+                }
+            }
+            if let Some(path) = path {
+                list.push(Worktree { path, branch });
             }
         }
-        Ok(map)
+        Ok(list)
     }
 
     /// Merge two commits in memory. `None` means they conflict.

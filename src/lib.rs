@@ -10,3 +10,4 @@ pub mod render;
 pub mod restack;
 pub mod store;
 pub mod submit;
+pub mod worktree;

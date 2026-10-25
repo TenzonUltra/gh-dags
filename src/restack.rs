@@ -2,8 +2,11 @@
 //! parent, replaying exactly `fork..branch`. The fast path is `git replay`
 //! (in memory, no checkout). On a conflict it falls back to `git rebase` for
 //! that branch and records a journal so `--continue` / `--abort` work.
+//! A change checked out in another worktree is rewritten there, so that
+//! worktree ends up on the new tip.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -11,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::git::{Git, Replay};
 use crate::model::{Base, State};
 use crate::store::Repo;
+use crate::worktree::{self, same_path};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Journal {
@@ -20,7 +24,10 @@ pub struct Journal {
     pub original_forks: BTreeMap<String, Option<String>>,
     /// The change `git rebase` is working on, and the commit it goes onto.
     pub pending: Option<Pending>,
-    /// Branch (or commit) to check out when done.
+    /// The worktree the restack started in. Changes not checked out anywhere
+    /// else are rebased here.
+    pub home: PathBuf,
+    /// Branch (or commit) to check out in `home` when done.
     pub return_to: String,
 }
 
@@ -28,6 +35,8 @@ pub struct Journal {
 pub struct Pending {
     pub change: String,
     pub onto: String,
+    /// The worktree the rebase runs in.
+    pub worktree: PathBuf,
 }
 
 #[derive(Debug, Default)]
@@ -38,8 +47,30 @@ pub struct Report {
 
 pub enum Outcome {
     Done(Report),
-    /// `git rebase` stopped on a conflict in this change.
-    Conflict(String),
+    /// `git rebase` stopped on a conflict in this change. `worktree` is where,
+    /// when that isn't the worktree we're running in.
+    Conflict {
+        change: String,
+        worktree: Option<PathBuf>,
+    },
+}
+
+impl Outcome {
+    fn conflict(git: &Git, change: &str, dir: &std::path::Path) -> Outcome {
+        let here = git.toplevel().is_ok_and(|t| same_path(&t, dir));
+        Outcome::Conflict {
+            change: change.to_string(),
+            worktree: (!here).then(|| dir.to_path_buf()),
+        }
+    }
+}
+
+/// `"x"`, or `"x" (checked out in /path)` for a conflict in another worktree.
+pub fn conflict_place(change: &str, worktree: &Option<PathBuf>) -> String {
+    match worktree {
+        Some(p) => format!("{change:?} (checked out in {})", p.display()),
+        None => format!("{change:?}"),
+    }
 }
 
 /// The commit trunk-based stacks sit on: the remote-tracking trunk when there
@@ -122,18 +153,18 @@ pub fn start(repo: &Repo, st: &mut State, scope: &Scope) -> Result<Outcome> {
         .filter(|n| scope.only.as_ref().is_none_or(|only| only.contains(n)))
         .filter(|n| !(scope.no_trunk && st.parent(n) == Some(Base::Trunk)))
         .collect();
-    let here = git.toplevel()?;
-    let elsewhere: Vec<String> = git
-        .worktree_branches()?
+    let home = git.toplevel()?;
+    let blocked: Vec<String> = git
+        .worktrees()?
         .into_iter()
-        .filter(|(b, p)| queue.contains(b) && *p != here)
-        .map(|(b, p)| format!("{b} ({})", p.display()))
+        .filter(|w| !same_path(&w.path, &home))
+        .filter_map(|w| {
+            let b = w.branch.filter(|b| queue.contains(b))?;
+            worktree::blocker(git, &b, &w.path)
+        })
         .collect();
-    if !elsewhere.is_empty() {
-        bail!(
-            "these changes are checked out in other worktrees, so they can't be rewritten: {}",
-            elsewhere.join(", ")
-        );
+    if !blocked.is_empty() {
+        bail!("can't restack yet:\n  {}", blocked.join("\n  "));
     }
     trunk_tip(git, st)?;
 
@@ -186,6 +217,7 @@ pub fn start(repo: &Repo, st: &mut State, scope: &Scope) -> Result<Outcome> {
         queue,
         original_tips,
         pending: None,
+        home,
         return_to: git.head()?,
     };
     if journal.queue.contains(&journal.return_to) {
@@ -202,13 +234,14 @@ pub fn resume(repo: &Repo, st: &mut State) -> Result<Outcome> {
     let mut journal: Journal = repo.load_journal()?.context("no restack is in progress")?;
     let mut report = Report::default();
     if let Some(p) = journal.pending.take() {
-        if git.rebase_in_progress() {
-            let ok = git.run_visible(&["rebase", "--continue"], &[("GIT_EDITOR", "true")])?;
+        let wt = Git::new(&p.worktree);
+        if wt.rebase_in_progress() {
+            let ok = wt.run_visible(&["rebase", "--continue"], &[("GIT_EDITOR", "true")])?;
             if !ok {
+                let outcome = Outcome::conflict(git, &p.change, &p.worktree);
                 journal.pending = Some(p);
                 repo.save_journal(&journal)?;
-                let name = journal.pending.as_ref().unwrap().change.clone();
-                return Ok(Outcome::Conflict(name));
+                return Ok(outcome);
             }
         }
         if !git.is_ancestor(&p.onto, &git.branch_tip(&p.change)?) {
@@ -230,15 +263,31 @@ pub fn resume(repo: &Repo, st: &mut State) -> Result<Outcome> {
 pub fn abort(repo: &Repo, st: &mut State) -> Result<()> {
     let git = &repo.git;
     let journal: Journal = repo.load_journal()?.context("no restack is in progress")?;
-    if git.rebase_in_progress() {
-        git.run(&["rebase", "--abort"])?;
-    }
+    let mut moved = Vec::new();
     for (name, orig) in &journal.original_tips {
         if let Ok(cur) = git.branch_tip(name)
             && cur != *orig
         {
-            git.update_branch(name, orig, &cur)?;
+            moved.push((name, orig, cur));
         }
+    }
+    // Check every worktree that has to follow its branch back before
+    // touching any of them.
+    for (name, _, _) in &moved {
+        if let Some(path) = worktree::checkout_of(git, name)?
+            && let Some(why) = worktree::blocker(git, name, &path)
+        {
+            bail!("can't abort yet: {why}");
+        }
+    }
+    if let Some(p) = &journal.pending {
+        let wt = Git::new(&p.worktree);
+        if wt.rebase_in_progress() {
+            wt.run(&["rebase", "--abort"])?;
+        }
+    }
+    for (name, orig, cur) in moved {
+        worktree::move_branch(git, name, orig, &cur)?;
     }
     for (name, fork) in journal.original_forks {
         if let Ok(c) = st.change_mut(&name) {
@@ -246,7 +295,7 @@ pub fn abort(repo: &Repo, st: &mut State) -> Result<()> {
         }
     }
     repo.save(st)?;
-    git.run(&["checkout", "--quiet", &journal.return_to])?;
+    Git::new(&journal.home).run(&["checkout", "--quiet", &journal.return_to])?;
     repo.clear_journal()
 }
 
@@ -265,21 +314,6 @@ pub fn needs_restack(git: &Git, st: &State) -> Result<bool> {
         }
     }
     Ok(false)
-}
-
-/// Point a branch at `new`, keeping the worktree consistent when it's the
-/// checked-out branch (which then has to be clean).
-pub fn move_branch(git: &Git, branch: &str, new: &str, old: &str) -> Result<()> {
-    if git.current_branch().as_deref() != Some(branch) {
-        return git.update_branch(branch, new, old);
-    }
-    if !git.is_clean()? {
-        bail!("{branch:?} is checked out with uncommitted changes; commit or stash them first");
-    }
-    git.run(&["checkout", "--quiet", "--detach"])?;
-    git.update_branch(branch, new, old)?;
-    git.run(&["checkout", "--quiet", branch])?;
-    Ok(())
 }
 
 /// Whether the branch's own commits already sit directly on `onto`. Having
@@ -305,6 +339,7 @@ fn run_queue(
     mut report: Report,
 ) -> Result<Outcome> {
     let git = &repo.git;
+    let home = Git::new(&journal.home);
     while let Some(name) = journal.queue.first().cloned() {
         let onto = parent_tip(git, st, &name)?;
         let tip = git.branch_tip(&name)?;
@@ -330,17 +365,30 @@ fn run_queue(
                 git.replay(&onto, &fork, &name)?
             };
             match replayed {
-                Replay::Done(new) => git.update_branch(&name, &new, &tip)?,
-                Replay::Empty => git.update_branch(&name, &onto, &tip)?,
+                Replay::Done(new) => worktree::move_branch(git, &name, &new, &tip)?,
+                Replay::Empty => worktree::move_branch(git, &name, &onto, &tip)?,
                 Replay::Failed => {
+                    // Rebase where the change is checked out, so that
+                    // worktree ends up on the result; anything else, at home.
+                    let dir = match worktree::checkout_of(git, &name)? {
+                        Some(path) => {
+                            if let Some(why) = worktree::blocker(git, &name, &path) {
+                                bail!("{why}");
+                            }
+                            path
+                        }
+                        None => journal.home.clone(),
+                    };
                     journal.pending = Some(Pending {
                         change: name.clone(),
                         onto: onto.clone(),
+                        worktree: dir.clone(),
                     });
                     repo.save(st)?;
                     repo.save_journal(&journal)?;
-                    if !git.run_visible(&["rebase", "--onto", &onto, &fork, &name], &[])? {
-                        return Ok(Outcome::Conflict(name));
+                    let wt = Git::new(&dir);
+                    if !wt.run_visible(&["rebase", "--onto", &onto, &fork, &name], &[])? {
+                        return Ok(Outcome::conflict(git, &name, &dir));
                     }
                     journal.pending = None;
                 }
@@ -352,7 +400,7 @@ fn run_queue(
         repo.save(st)?;
         repo.save_journal(&journal)?;
     }
-    git.run(&["checkout", "--quiet", &journal.return_to])?;
+    home.run(&["checkout", "--quiet", &journal.return_to])?;
     repo.clear_journal()?;
     Ok(Outcome::Done(report))
 }
