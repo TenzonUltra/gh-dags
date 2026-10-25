@@ -518,3 +518,72 @@ fn submit_frees_a_stacked_pr_before_retargeting_it() {
     assert_eq!(sb.stack(2), [3, 1, 2]);
     assert!(sb.github().get("implicitly_merged").is_none());
 }
+
+/// `view --json` minus what may differ between clones: creation order and
+/// the order stacks are listed in.
+fn comparable(sb: &Sandbox) -> serde_json::Value {
+    let mut v: serde_json::Value = serde_json::from_str(&sb.ok(&["view", "--json"])).unwrap();
+    v["next_seq"] = serde_json::json!(0);
+    for c in v["changes"].as_object_mut().unwrap().values_mut() {
+        c.as_object_mut().unwrap().remove("seq");
+    }
+    v["stacks"]
+        .as_array_mut()
+        .unwrap()
+        .sort_by_key(|s| s["changes"][0].as_str().unwrap().to_string());
+    v
+}
+
+#[test]
+fn import_rebuilds_the_dag_in_another_clone() {
+    let a = Sandbox::new();
+    a.ok(&["new", "auth"]);
+    a.commit_file("auth", "x\n", "auth");
+    a.ok(&["new", "tests"]);
+    a.commit_file("tests", "x\n", "tests");
+    a.git(&["checkout", "-q", "main"]);
+    a.ok(&["new", "theme"]);
+    a.commit_file("theme", "x\n", "theme");
+    a.ok(&["new", "login", "--on", "auth,theme"]);
+    a.commit_file("login", "x\n", "login");
+    a.git(&["checkout", "-q", "main"]);
+    a.ok(&["new", "docs"]);
+    a.commit_file("docs", "x\n", "docs");
+    // main ← auth ← tests, theme ← login a spur on auth, docs alone.
+    a.ok(&["submit"]);
+
+    let b = a.another_clone("work2");
+    let out = b.ok(&["import", "--all"]);
+    assert!(out.contains("imported"), "{out}");
+    assert_eq!(
+        comparable(&b),
+        comparable(&a),
+        "the same DAG, PRs and fork points"
+    );
+    assert!(b.ok(&["restack"]).contains("already in place"));
+
+    // One PR brings what it needs and sits on, and nothing else.
+    let login = serde_json::from_str::<serde_json::Value>(&a.ok(&["view", "--json"])).unwrap()["changes"]["login"]["pr"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let c = a.another_clone("work3");
+    c.ok(&["import", &login]);
+    let tracked: Vec<String> = comparable(&c)["changes"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(tracked, ["auth", "login", "theme"]);
+    let (ok, out) = c.dags(&["import", &login]);
+    assert!(!ok && out.contains("already tracked"), "{out}");
+
+    // The importing clone carries on from there.
+    b.git(&["checkout", "-q", "auth"]);
+    b.commit_file("auth", "y\n", "auth v2");
+    assert!(b.ok(&["restack"]).contains("restacked"));
+    let out = b.ok(&["submit"]);
+    assert!(out.contains("pushed auth"), "{out}");
+    assert!(b.github().get("implicitly_merged").is_none());
+}

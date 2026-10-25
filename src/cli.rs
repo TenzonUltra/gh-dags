@@ -7,6 +7,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 
 use crate::complete;
 use crate::github::Gh;
+use crate::import;
 use crate::layout::{self, FanIn};
 use crate::model::{Base, State};
 use crate::nav::{self, Nav};
@@ -144,6 +145,14 @@ enum Cmd {
         /// Open new PRs ready for review instead of as drafts
         #[arg(long)]
         ready: bool,
+    },
+    /// Bring a DAG that gh-dags submitted (from anywhere) into this repository
+    Import {
+        /// PR numbers; what they depend on and sit on comes along
+        prs: Vec<u64>,
+        /// Every open PR that gh-dags made
+        #[arg(long, conflicts_with = "prs")]
+        all: bool,
     },
     /// Absorb merges from GitHub, restack, and update PRs and stacks
     Sync,
@@ -304,6 +313,19 @@ pub fn run() -> Result<()> {
             )
         }),
         Cmd::Sync => with_github(&repo, |st, gh| submit::sync(&repo, st, gh, &style)),
+        Cmd::Import { prs, all } => with_github(&repo, |st, gh| {
+            if prs.is_empty() && !all {
+                bail!("name the PRs to import, or pass --all");
+            }
+            let names = import::import(&repo, st, gh, &prs, all)?;
+            repo.save(st)?;
+            println!("imported {}", names.join(", "));
+            print!(
+                "{}",
+                render(st, repo.git.current_branch().as_deref(), &style)
+            );
+            Ok(())
+        }),
         Cmd::Land {
             change,
             method,
@@ -538,7 +560,8 @@ fn mutate(repo: &Repo, st: &mut State, cmd: Cmd) -> Result<()> {
         | Cmd::Trunk
         | Cmd::Switch { .. }
         | Cmd::Completion { .. }
-        | Cmd::Complete { .. } => {
+        | Cmd::Complete { .. }
+        | Cmd::Import { .. } => {
             unreachable!()
         }
     }

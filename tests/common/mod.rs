@@ -9,7 +9,8 @@ use std::process::Command;
 use tempfile::TempDir;
 
 pub struct Sandbox {
-    pub _tmp: TempDir,
+    /// Shared by every clone of the same origin.
+    pub _tmp: std::rc::Rc<TempDir>,
     pub work: PathBuf,
     /// Extra environment for gh-dags runs.
     pub env: Vec<(String, String)>,
@@ -49,7 +50,7 @@ impl Sandbox {
         let work = tmp.path().join("work");
         let sb = Sandbox {
             work: work.clone(),
-            _tmp: tmp,
+            _tmp: std::rc::Rc::new(tmp),
             env: Vec::new(),
         };
         sb.git_in(
@@ -74,6 +75,29 @@ impl Sandbox {
         );
         sb.commit_file("README", "hello\n", "initial");
         sb.git(&["push", "-q", "origin", "main"]);
+        sb.ok(&["init"]);
+        sb
+    }
+
+    /// Another clone of the same origin (and the same fake GitHub), set up
+    /// with `gh dags init`.
+    pub fn another_clone(&self, name: &str) -> Sandbox {
+        let work = self._tmp.path().join(name);
+        let origin = self._tmp.path().join("origin.git");
+        self.git_in(
+            self._tmp.path(),
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ],
+        );
+        let sb = Sandbox {
+            _tmp: self._tmp.clone(),
+            work,
+            env: self.env.clone(),
+        };
         sb.ok(&["init"]);
         sb
     }
