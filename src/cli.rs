@@ -103,6 +103,10 @@ enum Cmd {
         /// Create the branch without switching to it
         #[arg(long)]
         no_checkout: bool,
+        /// Check the new change out in a new worktree at this path, and
+        /// leave this one where it is
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["message", "no_checkout"])]
+        worktree: Option<std::path::PathBuf>,
         #[command(flatten)]
         later: Later,
     },
@@ -675,6 +679,7 @@ fn mutate(repo: &Repo, st: &mut State, cmd: Cmd) -> Result<()> {
             park,
             message,
             no_checkout,
+            worktree,
             ..
         } => {
             if git.branch_exists(&name) {
@@ -704,7 +709,19 @@ fn mutate(repo: &Repo, st: &mut State, cmd: Cmd) -> Result<()> {
             *st = trial;
             let start = restack::parent_tip(git, st, &name)?;
             let back = git.head()?;
-            if no_checkout {
+            if let Some(path) = &worktree {
+                git.run(&["branch", "--no-track", &name, &start])?;
+                let path = path.to_string_lossy();
+                let added = git.exec(&["worktree", "add", "--quiet", &path, &name], None, &[])?;
+                if !added.ok {
+                    git.run(&["branch", "-D", &name])?;
+                    bail!(
+                        "{name} wasn't created: git worktree add failed: {}",
+                        added.stderr
+                    );
+                }
+                println!("{name} is checked out in {path}");
+            } else if no_checkout {
                 git.run(&["branch", "--no-track", &name, &start])?;
             } else {
                 git.run(&["checkout", "--quiet", "--no-track", "-b", &name, &start])?;

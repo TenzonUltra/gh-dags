@@ -332,6 +332,9 @@ repository has any, with their `git status` calls run in parallel.
 - `top` and `bottom` stay within the current stack, which is the unit GitHub
   shows.
 - `switch` with no name numbers the tree's rows and reads a choice.
+- `new --worktree <path>` checks the new change out in a new worktree and
+  leaves this one where it is; if `git worktree add` fails, the branch goes
+  too.
 - A change checked out in another worktree isn't switched to here; the
   command says where it is. With `--print-path` it prints that worktree's
   path instead (or this one's, after switching), for

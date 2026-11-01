@@ -103,7 +103,9 @@ Doing these by hand to a tracked branch works against gh-dags:
 
 ## Worktrees and other sessions
 
-- A change can be checked out in a worktree of its own. A restack moves a
+- A change can be checked out in a worktree of its own:
+  `gh dags new <name> --worktree <path>` makes the change and its worktree,
+  and leaves the current worktree where it is. A restack moves a
   *clean* worktree's branch and updates its files. A dirty one holds back its
   change.
 - So a restack you run can change files in a worktree that another person or
