@@ -128,8 +128,8 @@ Doing these by hand to a tracked branch works against gh-dags:
 - `gh dags submit`, unless the user asked for PRs. It pushes and opens them.
 - `gh dags submit --take-over <change>`. It overwrites what's on the remote
   (often someone else's push) and takes over its open PR.
-- Deleting branches. After a merge, gh-dags prints `git branch -D` hints;
-  don't run them unasked.
+- Deleting branches, including `--delete-merged` on `gh dags sync` or
+  `gh dags land`. Use it when the user asked for merged branches to go.
 - `gh dags restack --abort` when the user has partly resolved a conflict,
   since it discards that work.
 

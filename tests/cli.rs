@@ -1267,6 +1267,81 @@ fn new_can_start_a_change_in_its_own_worktree() {
 }
 
 #[test]
+fn landed_branches_are_deleted_once_nothing_is_based_on_them() {
+    let sb = Sandbox::new();
+    // main ← a ← b, with the spur s on a: s's PR is based on a and isn't in
+    // a's GitHub stack, so a can only go once sync has retargeted s.
+    sb.ok(&["new", "a"]);
+    sb.commit_file("a", "a\n", "Add a");
+    sb.ok(&["new", "b"]);
+    sb.commit_file("b", "b\n", "Add b");
+    sb.git(&["checkout", "-q", "a"]);
+    sb.ok(&["new", "s"]);
+    sb.commit_file("s", "s\n", "Add s");
+    sb.ok(&["submit"]);
+    let gone = |b: &str| {
+        sb.git(&["branch", "--list", b]).is_empty()
+            && sb
+                .git(&["ls-remote", "origin", &format!("refs/heads/{b}")])
+                .is_empty()
+    };
+
+    let out = sb.ok(&["land", "a", "--method", "squash", "--delete-merged"]);
+    assert!(out.contains("retargeted #3 s → main"), "{out}");
+    assert!(out.contains("deleted a here and on origin"), "{out}");
+    assert!(gone("a"));
+    assert_eq!(sb.pr_base(3), "main");
+    assert!(
+        sb.github().get("closed_by_deletion").is_none(),
+        "{}",
+        sb.github()["closed_by_deletion"]
+    );
+
+    // Without the flag, landed branches stay until a sync that has it: b gets
+    // a commit that didn't land, and s is checked out in a worktree.
+    let out = sb.ok(&["land", "b", "--method", "squash"]);
+    assert!(
+        out.contains("merged: b (`gh dags sync --delete-merged` deletes its branch)"),
+        "{out}"
+    );
+    sb.git(&["checkout", "-q", "main"]);
+    let ws = sb.worktree("wt-s", "s");
+    sb.ok(&["land", "s", "--method", "squash"]);
+    sb.git(&["checkout", "-q", "b"]);
+    sb.commit_file("b2", "b2\n", "More b");
+    sb.git(&["checkout", "-q", "main"]);
+    let out = sb.ok(&["sync", "--delete-merged"]);
+    for line in [
+        "kept b: it has commits that didn't land",
+        "deleted b on origin",
+        "kept s: it's checked out in ",
+        "deleted s on origin",
+    ] {
+        assert!(out.contains(line), "missing {line:?} in:\n{out}");
+    }
+    assert_eq!(sb.own_commits("main", "b").last().unwrap(), "More b");
+    let out = sb.ok(&["sync", "--delete-merged"]);
+    assert!(!out.contains("kept b"), "said once: {out}");
+    assert!(out.contains("kept s: it's checked out in "), "{out}");
+
+    // The setting makes it the default.
+    sb.git(&["worktree", "remove", ws.work.to_str().unwrap()]);
+    sb.git(&["config", "gh-dags.deleteMerged", "true"]);
+    let out = sb.ok(&["sync"]);
+    assert!(out.contains("deleted s here"), "{out}");
+    assert!(gone("s"));
+    assert!(
+        !fs::read_to_string(sb.work.join(".git/gh-dags/state.json"))
+            .unwrap()
+            .contains("landed")
+    );
+    assert!(sb.github().get("closed_by_deletion").is_none());
+    sb.git(&["config", "gh-dags.deleteMerged", "maybe"]);
+    let (ok, out) = sb.dags(&["sync"]);
+    assert!(!ok && out.contains("gh-dags.deleteMerged"), "{out}");
+}
+
+#[test]
 fn completion_offers_names_from_the_repo() {
     let sb = Sandbox::new();
     forked(&sb);

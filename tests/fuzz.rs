@@ -115,6 +115,12 @@ struct World {
     held: BTreeSet<String>,
     /// Conflicts that came up in another worktree.
     conflicts_elsewhere: usize,
+    /// Landed branches given a commit that didn't land, which
+    /// `--delete-merged` has to keep here.
+    unlanded: BTreeSet<String>,
+    /// Rolls for `--delete-merged`, apart from `rng` so the rest of the
+    /// GitHub fuzz draws the same actions as ever.
+    deletes: Rng,
 }
 
 impl World {
@@ -137,6 +143,8 @@ impl World {
             next_wt: 0,
             held: BTreeSet::new(),
             conflicts_elsewhere: 0,
+            unlanded: BTreeSet::new(),
+            deletes: Rng(seed ^ 0xd1b5_4a32_d192_ed03),
         }
     }
 
@@ -1058,6 +1066,14 @@ struct GithubCoverage {
     /// Branches changed here while GitHub rebased them after a merge, whose
     /// local work sync had to keep.
     kept: usize,
+    /// Landed branches `--delete-merged` deleted, and ones it kept here
+    /// because they had commits that didn't land.
+    deleted: usize,
+    kept_unlanded: usize,
+    /// Flagged lands where an open PR outside the merged PRs' GitHub stack
+    /// was based on a branch that landed, so sync had to retarget it before
+    /// the branch went.
+    based_on_deleted: usize,
 }
 
 impl World {
@@ -1078,6 +1094,9 @@ impl World {
             self.fail(&format!(
                 "GitHub implicitly merged {prs}: a base came to contain its head"
             ));
+        }
+        if let Some(prs) = gh.get("closed_by_deletion") {
+            self.fail(&format!("deleting a branch closed {prs}"));
         }
         let mut layout_stacks: Vec<(String, Vec<u64>)> = Vec::new();
         for s in &st.stacks {
@@ -1271,6 +1290,30 @@ impl World {
         } else {
             &candidates
         };
+        // With --delete-merged, prefer a land that leaves a spur PR on a
+        // branch that lands, which sync has to retarget before the branch can
+        // go. Where the spurs end up is the layout after land's hoist.
+        let delete = self.deletes.below(2) == 0;
+        let spurred: Vec<String> = pool
+            .iter()
+            .filter(|n| {
+                let mut lands = st.logical_ancestors(n);
+                lands.insert(n.to_string());
+                let mut hoisted = st.clone();
+                layout::hoist(&mut hoisted, n).is_ok()
+                    && hoisted.stacks.iter().any(|s| {
+                        matches!(&s.base, Base::Change(b) if lands.contains(b))
+                            && !lands.contains(&s.changes[0])
+                            && st.changes[&s.changes[0]].pr.is_some()
+                    })
+            })
+            .cloned()
+            .collect();
+        let pool = if delete && !spurred.is_empty() {
+            &spurred
+        } else {
+            pool
+        };
         let Some(c) = self.rng.pick(pool).cloned() else {
             return;
         };
@@ -1298,8 +1341,43 @@ impl World {
                 }
             }
         }
+        // Open PRs based on `base` that aren't in its PR's GitHub stack,
+        // which GitHub retargets by itself.
+        let spurs_on = |gh: &serde_json::Value, base: &str, pr: u64| -> Vec<u64> {
+            let stacked: Vec<u64> = gh["stacks"]
+                .as_object()
+                .unwrap()
+                .values()
+                .filter(|s| s["open"] == true)
+                .map(|s| s["prs"].as_array().unwrap())
+                .find(|prs| prs.contains(&serde_json::json!(pr)))
+                .map(|prs| prs.iter().map(|v| v.as_u64().unwrap()).collect())
+                .unwrap_or_default();
+            gh["prs"]
+                .as_object()
+                .unwrap()
+                .values()
+                .filter(|p| p["state"] == "open" && p["base"] == base)
+                .map(|p| p["number"].as_u64().unwrap())
+                .filter(|n| !stacked.contains(n))
+                .collect()
+        };
+        // GitHub as the merging run found it: an earlier run may push first.
+        let mut gh_before = serde_json::Value::Null;
+        let mut prs_before = BTreeMap::new();
         for _ in 0..3 {
-            let (ok, out) = self.dags(&["land", &c, "--method", "squash"]);
+            gh_before = self.sb.github();
+            prs_before = self
+                .state()
+                .changes
+                .into_iter()
+                .filter_map(|(n, c)| Some((n, c.pr?)))
+                .collect::<BTreeMap<String, u64>>();
+            let mut args = vec!["land", c.as_str(), "--method", "squash"];
+            if delete {
+                args.push("--delete-merged");
+            }
+            let (ok, out) = self.dags(&args);
             if !ok {
                 self.fail(&format!("land {c} failed:\n{out}"));
             }
@@ -1316,12 +1394,88 @@ impl World {
         if gone.len() >= 2 {
             cov.multi += 1;
         }
-        for m in gone {
-            self.m.merged.insert(m.clone());
-            self.m.own.remove(m);
+        for m in &gone {
+            self.m.merged.insert(m.to_string());
+            self.m.own.remove(*m);
             cov.merged += 1;
+            if !delete && !(self.has_branch(m) && self.on_origin(m)) {
+                self.fail(&format!(
+                    "{m} landed, and its branch went without --delete-merged"
+                ));
+            }
+        }
+        if delete {
+            self.check_deleted(cov);
+            let gh = self.sb.github();
+            let still_open = |n: &u64| gh["prs"][n.to_string()]["state"] == "open";
+            if gone.iter().any(|m| {
+                prs_before
+                    .get(*m)
+                    .is_some_and(|&pr| spurs_on(&gh_before, m, pr).iter().any(still_open))
+            }) {
+                cov.based_on_deleted += 1;
+            }
         }
         self.full_restack();
+    }
+
+    fn has_branch(&self, b: &str) -> bool {
+        !self.sb.git(&["branch", "--list", b]).is_empty()
+    }
+
+    fn on_origin(&self, b: &str) -> bool {
+        !self
+            .sb
+            .git(&["ls-remote", "origin", &format!("refs/heads/{b}")])
+            .is_empty()
+    }
+
+    /// After `--delete-merged`: every landed branch is gone, here and on
+    /// origin, except that one with commits that didn't land stays here.
+    fn check_deleted(&self, cov: &mut GithubCoverage) {
+        for m in &self.m.merged {
+            let here = self.has_branch(m);
+            if here != self.unlanded.contains(m) || self.on_origin(m) {
+                self.fail(&format!(
+                    "after --delete-merged, landed {m} is {} here and {} on origin",
+                    if here { "still" } else { "gone" },
+                    if self.on_origin(m) { "still" } else { "gone" },
+                ));
+            }
+        }
+        cov.deleted = self.m.merged.len() - self.unlanded.len();
+        cov.kept_unlanded = self.unlanded.len();
+    }
+
+    /// Commit on a landed branch that's still here, then `sync
+    /// --delete-merged`: it has to keep that branch here and delete the rest.
+    fn commit_on_landed(&mut self, cov: &mut GithubCoverage) {
+        let left: Vec<String> = self
+            .m
+            .merged
+            .iter()
+            .filter(|m| !self.unlanded.contains(*m) && self.has_branch(m))
+            .cloned()
+            .collect();
+        let Some(m) = self.deletes.pick(&left).cloned() else {
+            return;
+        };
+        let tree = self.sb.git(&["rev-parse", &format!("{m}^{{tree}}")]);
+        let commit = self
+            .sb
+            .git(&["commit-tree", &tree, "-p", &m, "-m", "didn't land"]);
+        self.sb
+            .git(&["update-ref", &format!("refs/heads/{m}"), &commit]);
+        self.unlanded.insert(m.clone());
+        self.log.push(format!("committed on landed {m}"));
+        let (ok, out) = self.dags(&["sync", "--delete-merged"]);
+        if !ok || !out.contains(&format!("kept {m}: it has commits that didn't land")) {
+            self.fail(&format!(
+                "sync --delete-merged after a commit on {m}:\n{out}"
+            ));
+        }
+        self.check_github(cov, false);
+        self.check_deleted(cov);
     }
 }
 
@@ -1387,6 +1541,9 @@ fn github_case(seed: u64, rounds: usize) -> GithubCoverage {
         if w.rng.below(2) == 0 {
             w.land_for_real(&mut cov);
         }
+        if w.deletes.below(3) == 0 {
+            w.commit_on_landed(&mut cov);
+        }
     }
     if std::env::var_os("FUZZ_LOG").is_some() {
         eprintln!("{}", w.log.join("\n"));
@@ -1414,6 +1571,9 @@ fn github(seeds: Vec<u64>, rounds: usize) {
         t.multi += c.multi;
         t.inserted += c.inserted;
         t.kept += c.kept;
+        t.deleted += c.deleted;
+        t.kept_unlanded += c.kept_unlanded;
+        t.based_on_deleted += c.based_on_deleted;
         t
     });
     eprintln!("github coverage: {total:?}");
@@ -1423,6 +1583,7 @@ fn github(seeds: Vec<u64>, rounds: usize) {
             "{total:?}"
         );
         assert!(total.inserted >= 1 && total.kept >= 1, "{total:?}");
+        assert!(total.deleted >= 1 && total.kept_unlanded >= 1, "{total:?}");
     }
 }
 

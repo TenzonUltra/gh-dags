@@ -239,6 +239,15 @@ impl Gh {
         Ok(out)
     }
 
+    /// The open PRs based on `branch`.
+    pub fn open_prs_on(&self, branch: &str) -> Result<Vec<u64>> {
+        let path = self.repo_path(&format!("pulls?state=open&base={branch}&per_page=100"));
+        let v = self.api("GET", &path, None)?;
+        Ok(v.as_array()
+            .map(|a| a.iter().filter_map(|p| p["number"].as_u64()).collect())
+            .unwrap_or_default())
+    }
+
     pub fn open_pr_for(&self, branch: &str) -> Result<Option<u64>> {
         let path = self.repo_path(&format!("pulls?state=open&head={}:{branch}", self.owner));
         let v = self.api("GET", &path, None)?;

@@ -249,6 +249,24 @@ resolution come from `gh` itself.
 4. Restacks.
 5. Pushes and updates PRs and stacks. It never opens new PRs; it says when an
    unparked change needs `submit`.
+6. With `--delete-merged` (or `gh-dags.deleteMerged` in git config), deletes
+   the branches of landed changes, here and on the remote.
+
+Deleting is last because deleting a PR's base branch closes that PR (§10), so
+every PR based on a landed branch has to be retargeted first. Then a branch
+goes only if nothing that didn't land goes with it:
+
+- **Here**, when its tip is (an ancestor of) the head its PR merged at, and no
+  worktree has it checked out.
+- **On the remote**, when its tip is (an ancestor of) that head, and no open
+  PR is based on it, including PRs gh-dags doesn't manage. The push leases on
+  the tip it saw.
+
+Otherwise it's kept, and `sync` says why. gh-dags remembers each landed branch
+with its merged head (`landed` in the state) until the branch is gone, so a
+later `--delete-merged` deletes it once it's no longer checked out or based
+on, and a sync that stopped early still gets to it. A branch kept for commits
+that didn't land is reported once, then left alone.
 
 When the bottom of a stack merges, GitHub's automatic rebase can **rewrite
 remote branches**. For each change we track `pushed` (the last sha we pushed):
@@ -404,6 +422,12 @@ version):
   drafts with HTTP 400 and `{"status":"failed","details":{"message":…}}`, so
   `land` marks the PRs it merges ready for review first. That needs GraphQL,
   because REST can't un-draft a PR.
+- **Deleting a branch closes the open PRs based on it**, even after its own PR
+  merged, whether through `git push --delete` or the REST API (checked Nov
+  2026). So `sync` retargets them before it deletes (§7).
+- **A merged PR keeps the head it merged at** (`headRefOid`), even after more
+  pushes to the branch or its deletion. That's how `--delete-merged` tells
+  what landed.
 - **After a merge, GitHub rebases the rest of the stack.** It force-pushes the
   remaining branches and retargets the next PR to trunk
   (`AutomaticBaseChangeSucceededEvent`). `sync` adopts those rewrites (§7). The

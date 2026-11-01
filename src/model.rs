@@ -60,6 +60,10 @@ pub struct State {
     pub next_seq: u64,
     pub changes: BTreeMap<String, Change>,
     pub stacks: Vec<Stack>,
+    /// Branches of changes that landed, each with the head its PR merged at,
+    /// while the branch is still here or on the remote.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub landed: BTreeMap<String, String>,
 }
 
 impl State {
@@ -71,6 +75,7 @@ impl State {
             next_seq: 0,
             changes: BTreeMap::new(),
             stacks: Vec::new(),
+            landed: BTreeMap::new(),
         }
     }
 

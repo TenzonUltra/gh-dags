@@ -41,8 +41,8 @@ and nothing else on stdout.
 | Command | What it does |
 |---|---|
 | `gh dags submit [--ready] [--take-over <changes>]` | Push, open PRs (drafts unless `--ready`), and match GitHub's stacks to the layout. `--take-over` pushes over a branch gh-dags didn't push, or one that diverged, and adopts its open PR |
-| `gh dags sync` | Absorb merges, take GitHub's rebases, restack, and update PRs |
-| `gh dags land <change> [--method squash\|merge\|rebase] [--local]` | Move a change and what it needs to the bottom, then merge them. If that means reordering or pushing first, it does that and asks for a second run once CI is green. `--local` only reorders |
+| `gh dags sync [--delete-merged]` | Absorb merges, take GitHub's rebases, restack, and update PRs. `--delete-merged` then deletes landed branches here and on GitHub (default: `git config gh-dags.deleteMerged`) |
+| `gh dags land <change> [--method squash\|merge\|rebase] [--local] [--delete-merged]` | Move a change and what it needs to the bottom, then merge them. If that means reordering or pushing first, it does that and asks for a second run once CI is green. `--local` only reorders |
 
 ## Messages worth knowing
 
@@ -58,3 +58,7 @@ and nothing else on stdout.
   Pick one with the user. (`sync` reconciles a rebase GitHub made by itself.)
 - `… is already on origin, and gh-dags never pushed it`: someone else's
   branch. `gh dags submit --take-over <change>` replaces it; ask first.
+- `kept …: it has commits that didn't land` (after `--delete-merged`): the
+  branch got commits after its PR merged. Ask the user what they're for.
+- `kept …: it's checked out in …` or `kept … on origin: #N is based on it`:
+  deleted by a later `gh dags sync --delete-merged` once that's no longer so.
