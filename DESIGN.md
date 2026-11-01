@@ -249,7 +249,19 @@ remote branches**. For each change we track `pushed` (the last sha we pushed):
 | same | same | Nothing. |
 | changed | same | Normal case. Push. |
 | same | changed | Remote moved (GitHub rebase or a collaborator). Adopt the remote tip and recompute the fork point. |
-| changed | changed | Diverged. Stop and ask. |
+| changed | changed | Compare what each side holds (below). |
+
+When both sides changed, `sync` compares the commits, not just the hashes:
+
+- **Local contains the remote tip** (you built on GitHub's version): record the
+  remote as pushed, and push yours over it.
+- **The same commits** (equal patch-ids and messages) on different bases: take
+  GitHub's.
+- **GitHub only moved what was pushed** (its rebase after a merge, so its
+  commits are the pushed tip's top commits on a new base): keep yours, restack
+  it, and push it.
+- **Otherwise** each side has something the other lacks. Stop, and say how
+  many commits are on each side, and how to put yours on GitHub's.
 
 Adopting a tip, and fast-forwarding the local trunk, happen in whichever
 worktree has that branch checked out, the same way restack moves it (§5). A
