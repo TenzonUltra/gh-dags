@@ -71,6 +71,8 @@ pub struct Report {
     pub moved: Vec<String>,
     pub unchanged: usize,
     pub blocked: Vec<Blocked>,
+    /// Moved changes checked out in other worktrees, which moved with them.
+    pub followed: Vec<(String, PathBuf)>,
 }
 
 pub enum Outcome {
@@ -190,7 +192,7 @@ pub fn start(repo: &Repo, st: &mut State, scope: &Scope) -> Result<Outcome> {
     if !git.is_clean()? {
         bail!("you have uncommitted changes; commit or stash them first");
     }
-    let queue: Vec<String> = st
+    let mut queue: Vec<String> = st
         .topo_order()?
         .into_iter()
         .filter(|n| scope.only.as_ref().is_none_or(|only| only.contains(n)))
@@ -201,8 +203,13 @@ pub fn start(repo: &Repo, st: &mut State, scope: &Scope) -> Result<Outcome> {
     // A change whose parent is outside the scope goes onto that parent as it
     // is. If the parent (or something under it) hasn't been restacked since
     // the layout changed, it can still hold some of the change's own
-    // commits, and replaying those onto it would drop them.
-    for name in &queue {
+    // commits, and replaying those onto it would drop them. Hold those back.
+    let mut blocked = Vec::new();
+    for name in queue.clone() {
+        if !queue.contains(&name) {
+            continue;
+        }
+        let name = &name;
         let bases = match st.parent(name) {
             Some(Base::Change(p)) => vec![p],
             Some(Base::Sum(ms)) => ms,
@@ -224,17 +231,36 @@ pub fn start(repo: &Repo, st: &mut State, scope: &Scope) -> Result<Outcome> {
             continue;
         };
         let tip = git.branch_tip(name)?;
-        if !in_place(git, &onto, &tip, Some(&fork))
-            && let Some(mb) = git.merge_base(&tip, &onto)
-            && mb != fork
-            && git.is_ancestor(&fork, &mb)
-        {
-            bail!(
+        // The parent has the change's own commits: the same ones (below the
+        // merge base), or copies of them from before the change was restacked.
+        let has_them = |onto: &str| -> Result<bool> {
+            if let Some(mb) = git.merge_base(&tip, onto)
+                && mb != fork
+                && git.is_ancestor(&fork, &mb)
+            {
+                return Ok(true);
+            }
+            Ok(!git.copies_in(onto, &fork, &tip)?.is_empty())
+        };
+        if !in_place(git, &onto, &tip, Some(&fork)) && has_them(&onto)? {
+            let why = format!(
                 "{name} can't go on {stale} yet: it still has {name}'s commits from before the \
                  layout changed; restack what's below {name} first \
                  (`gh dags restack {name} --downstack`)",
                 stale = outside.join(", ")
             );
+            let held = st.subtree(name);
+            let above = queue
+                .iter()
+                .filter(|n| *n != name && held.contains(*n))
+                .cloned()
+                .collect();
+            queue.retain(|n| !held.contains(n));
+            blocked.push(Blocked {
+                change: name.clone(),
+                above,
+                why,
+            });
         }
     }
 
@@ -252,7 +278,7 @@ pub fn start(repo: &Repo, st: &mut State, scope: &Scope) -> Result<Outcome> {
         pending: None,
         home: git.toplevel()?,
         return_to: git.head()?,
-        blocked: Vec::new(),
+        blocked,
     };
     if journal.queue.contains(&journal.return_to) {
         // Rewriting the checked-out branch under the worktree; step off it.
@@ -373,6 +399,26 @@ fn in_place(git: &Git, onto: &str, tip: &str, fork: Option<&str>) -> bool {
     }
 }
 
+/// Whether `commit` was ever the trunk's tip, here or as last fetched.
+fn was_trunk_tip(git: &Git, st: &State, commit: &str) -> bool {
+    [
+        format!("refs/remotes/{}/{}", st.remote, st.trunk),
+        format!("refs/heads/{}", st.trunk),
+    ]
+    .iter()
+    .any(|r| git.reflog(r).iter().any(|c| c == commit))
+}
+
+/// The trunk ref restacks build on, as the user would name it.
+fn trunk_label(git: &Git, st: &State) -> String {
+    let remote = format!("{}/{}", st.remote, st.trunk);
+    if git.resolve(&format!("refs/remotes/{remote}")).is_some() {
+        remote
+    } else {
+        st.trunk.clone()
+    }
+}
+
 /// Leave a change, and what's stacked on it, for a later restack.
 fn hold_back(journal: &mut Journal, st: &State, name: String, why: String) {
     let held = st.subtree(&name);
@@ -424,6 +470,24 @@ fn run_queue(
                 repo.save_journal(&journal)?;
                 continue;
             }
+            // A trunk tip older than where the change already sits (a stale
+            // remote-tracking ref) would move it backwards; leave it.
+            if st.parent(&name) == Some(Base::Trunk)
+                && let Some(f) = &fork
+                && *f != onto
+                && git.is_ancestor(&onto, f)
+                && was_trunk_tip(git, st, f)
+            {
+                let why = format!(
+                    "{} is behind where {name} sits; fetch it (`git fetch {}`), then restack",
+                    trunk_label(git, st),
+                    st.remote
+                );
+                hold_back(&mut journal, st, name, why);
+                repo.save_journal(&journal)?;
+                continue;
+            }
+            let followed = holder.clone().filter(|p| !same_path(p, &journal.home));
             let fork = match fork {
                 Some(f) => f,
                 None => git.merge_base(&tip, &onto).with_context(|| {
@@ -461,6 +525,9 @@ fn run_queue(
                 }
             }
             report.moved.push(name.clone());
+            if let Some(path) = followed {
+                report.followed.push((name.clone(), path));
+            }
         }
         st.change_mut(&name)?.fork = Some(onto);
         journal.queue.remove(0);

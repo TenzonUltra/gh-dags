@@ -173,6 +173,11 @@ parent.
   branch. A journal (`restack.json`) records the queue and every branch's
   original tip. `restack --continue` resumes. `restack --abort` restores every
   ref.
+- **Layout commands restack only what they moved.** `new`, `track`, `link`,
+  `unlink`, `move`, and `land --local` restack the changes whose parent they
+  changed, and what's stacked on those. Other stacks stay where they are, even
+  behind trunk; `sync` and a plain `restack` catch them up. `--no-restack`
+  records the layout change and moves nothing.
 - **Other worktrees.** A change checked out in another worktree is rewritten
   there. On the fast path that worktree steps off the branch, the ref moves,
   and it steps back on, so its files follow. On a conflict, `git rebase` runs
@@ -300,7 +305,7 @@ the full state for scripts.
 | `link <change> <dep>…` / `unlink …` | Edit DAG edges. |
 | `move <change> --onto <target>` | Manual layout control. Validated against the invariant. |
 | `view` (default) | Tree view, as above. |
-| `restack [<change>] [--upstack\|--downstack] [--no-trunk]` | Rebase every change onto its physical parent, or only a change's subtree (`--upstack`) or ancestors (`--downstack`). `--no-trunk` leaves trunk-based changes in place. A scoped restack refuses to put a change on a parent outside the scope that still holds the change's own commits (it wasn't restacked after a layout change). Also `--continue` / `--abort`. |
+| `restack [<change>] [--upstack\|--downstack] [--no-trunk]` | Rebase every change onto its physical parent, or only a change's subtree (`--upstack`) or ancestors (`--downstack`). `--no-trunk` leaves trunk-based changes in place. A scoped restack holds back a change whose parent outside the scope still holds the change's own commits (it wasn't restacked after a layout change). A trunk-based change is never moved onto a trunk tip older than where it sits (a stale `origin/<trunk>`); it's held back with a hint to fetch. Also `--continue` / `--abort`. |
 | `up/down [n]`, `top`, `bottom`, `trunk`, `switch [<change>]` | Navigation (see below). |
 | `completion <shell>` | Tab-completion hook (see below). |
 | `submit [--ready]` | Push, create or update PRs, update stacks and annotations. |

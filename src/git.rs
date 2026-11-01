@@ -263,6 +263,36 @@ impl Git {
         Ok(list)
     }
 
+    /// The commits a ref has pointed at, newest first (empty without a reflog).
+    pub fn reflog(&self, refname: &str) -> Vec<String> {
+        self.exec(&["reflog", "show", "--format=%H", refname, "--"], None, &[])
+            .ok()
+            .filter(|o| o.ok)
+            .map(|o| o.stdout.lines().map(String::from).collect())
+            .unwrap_or_default()
+    }
+
+    /// The commits in `fork..tip` that `onto` already has as copies (the same
+    /// patch, a different commit): replaying them onto `onto` would drop them
+    /// as already applied.
+    pub fn copies_in(&self, onto: &str, fork: &str, tip: &str) -> Result<Vec<String>> {
+        let own = self.run(&["rev-list", &format!("{fork}..{tip}")])?;
+        let own: std::collections::BTreeSet<&str> = own.lines().collect();
+        let marked = self.run(&[
+            "rev-list",
+            "--cherry-mark",
+            "--right-only",
+            "--no-merges",
+            &format!("{onto}...{tip}"),
+        ])?;
+        Ok(marked
+            .lines()
+            .filter_map(|l| l.strip_prefix('='))
+            .filter(|c| own.contains(c))
+            .map(String::from)
+            .collect())
+    }
+
     /// Merge two commits in memory: the tree, or the paths that conflict.
     pub fn merge_tree(&self, a: &str, b: &str) -> Result<Result<String, Vec<String>>> {
         let args = [
