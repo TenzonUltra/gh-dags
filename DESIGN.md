@@ -294,8 +294,18 @@ main
 This is the physical layout rendered as a tree from trunk outward. A
 continuation in the same stack is the first child, and spurs branch off. Each
 line shows the logical deps when they say more than the parent does, false
-dependencies are flagged, and parked changes are marked `⊕`. `--json` gives
-the full state for scripts.
+dependencies are flagged, and parked changes are marked `⊕`. A change checked
+out in another worktree shows `in <path>`, with `(uncommitted)` when that
+worktree is dirty. `needs restack` marks a change whose parent moved under it,
+and `behind origin/<trunk>` one that only trunk has moved past. `--json` gives
+the full state for scripts, with each change's `head` (branch tip),
+`needs_restack` (a plain restack would move it, counting what's below it),
+`after` (the change it's only ordered after), and `worktree` and `dirty`.
+
+`view` runs often, so this costs little: every tip comes from one
+`for-each-ref`, a fork point equal to its parent's tip settles a change
+without an ancestry check, and other worktrees are looked at only when the
+repository has any, with their `git status` calls run in parallel.
 
 | Command | What it does |
 |---|---|

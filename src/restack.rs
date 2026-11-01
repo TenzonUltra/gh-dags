@@ -388,7 +388,7 @@ pub fn needs_restack(git: &Git, st: &State, parked: bool) -> Result<bool> {
 /// trunk) still has trunk in its history, but also `a`'s commits, which it
 /// must drop. Those show up as a fork point that is in the branch's history
 /// but not below `onto`.
-fn in_place(git: &Git, onto: &str, tip: &str, fork: Option<&str>) -> bool {
+pub(crate) fn in_place(git: &Git, onto: &str, tip: &str, fork: Option<&str>) -> bool {
     if !git.is_ancestor(onto, tip) {
         return false;
     }

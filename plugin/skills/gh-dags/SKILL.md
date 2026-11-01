@@ -12,10 +12,13 @@ rebasing, pushing, and PR bookkeeping.
 
 ## Look before acting
 
-`gh dags view --json` prints the state: each change's deps and PR number, and
-the stacks. It's easier to read reliably than the tree that `gh dags view`
-draws. A stack's `base` is `"trunk"`, `{"change": "<name>"}` (it hangs off
-that change), or `{"sum": [...]}` (it's parked on a merge of those).
+`gh dags view --json` prints the state. Each change has its deps, PR number,
+`head` (branch tip), `needs_restack` (a plain restack would move it), `after`
+(the change it's only ordered after, for layout), and `worktree` and `dirty`
+when another worktree has it checked out. It's easier to read reliably than
+the tree that `gh dags view` draws. A stack's `base` is `"trunk"`,
+`{"change": "<name>"}` (it hangs off that change), or `{"sum": [...]}` (it's
+parked on a merge of those).
 
 Trunk means `origin/<trunk>` as last fetched, not your local trunk branch,
 which is often stale when there are many worktrees. `gh dags sync` fetches. If gh-dags isn't set up in the repo, it says so. Run `gh dags init`

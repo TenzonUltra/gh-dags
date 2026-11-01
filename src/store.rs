@@ -95,6 +95,14 @@ impl Repo {
         Ok(Repo { git, dir })
     }
 
+    /// Whether the repository has worktrees besides the main one.
+    pub fn has_linked_worktrees(&self) -> bool {
+        let linked = self.dir.parent().map(|d| d.join("worktrees"));
+        linked
+            .and_then(|d| std::fs::read_dir(d).ok())
+            .is_some_and(|mut entries| entries.next().is_some())
+    }
+
     fn state_path(&self) -> PathBuf {
         self.dir.join("state.json")
     }
