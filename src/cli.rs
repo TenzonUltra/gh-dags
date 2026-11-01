@@ -13,6 +13,7 @@ use crate::model::{Base, State};
 use crate::nav::{self, Nav};
 use crate::render::{Style, render, rows};
 use crate::restack::{self, Outcome, Scope};
+use crate::status;
 use crate::store::Repo;
 use crate::submit;
 use crate::worktree;
@@ -325,11 +326,15 @@ pub fn run() -> Result<()> {
         Cmd::Init { trunk, remote } => init(&repo, trunk, remote),
         Cmd::View { json } => {
             let st = repo.load()?;
+            let status = status::statuses(&repo, &st)?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&st)?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&view_json(&st, &status)?)?
+                );
             } else {
                 let current = repo.git.current_branch();
-                print!("{}", render(&st, current.as_deref(), &style));
+                print!("{}", render(&st, current.as_deref(), &status, &style));
                 if repo.has_journal() {
                     println!(
                         "{}",
@@ -472,9 +477,10 @@ pub fn run() -> Result<()> {
             let names = import::import(&repo, st, gh, &prs, all)?;
             repo.save(st)?;
             println!("imported {}", names.join(", "));
+            let status = status::statuses(&repo, st)?;
             print!(
                 "{}",
-                render(st, repo.git.current_branch().as_deref(), &style)
+                render(st, repo.git.current_branch().as_deref(), &status, &style)
             );
             Ok(())
         }),
@@ -559,14 +565,39 @@ fn go(repo: &Repo, st: &State, nav: Nav, dest: Dest) -> Result<()> {
     Ok(())
 }
 
+/// The state as JSON, each change with where it stands: its branch tip, whether
+/// a restack would move it, the change it's only ordered after, and the other
+/// worktree it's checked out in.
+fn view_json(st: &State, status: &status::Statuses) -> Result<serde_json::Value> {
+    let mut v = serde_json::to_value(st)?;
+    if let Some(changes) = v["changes"].as_object_mut() {
+        for (name, c) in changes {
+            let Some(c) = c.as_object_mut() else { continue };
+            if let Some(s) = status.of.get(name) {
+                c.insert("head".into(), s.head.clone().into());
+                c.insert("needs_restack".into(), s.needs_restack.into());
+                if let Some(path) = &s.worktree {
+                    c.insert("worktree".into(), path.display().to_string().into());
+                    c.insert("dirty".into(), s.dirty.into());
+                }
+            }
+            if let Some(after) = st.ordering_only_parent(name) {
+                c.insert("after".into(), after.into());
+            }
+        }
+    }
+    Ok(v)
+}
+
 /// `switch` with no name: number the tree's rows and read a choice.
 fn pick(repo: &Repo, st: &State, style: &Style) -> Result<String> {
     if !std::io::stdin().is_terminal() {
         bail!("name the change to switch to");
     }
     let current = repo.git.current_branch();
+    let status = status::statuses(repo, st)?;
     let mut choices = Vec::new();
-    for (name, text) in rows(st, current.as_deref(), style) {
+    for (name, text) in rows(st, current.as_deref(), &status, style) {
         match name {
             Some(n) => {
                 choices.push(n);

@@ -165,6 +165,20 @@ impl Git {
             .with_context(|| format!("branch {branch:?} doesn't exist"))
     }
 
+    /// Where the refs matching `patterns` point, by full name, in one call.
+    pub fn refs(&self, patterns: &[&str]) -> Result<BTreeMap<String, String>> {
+        let mut args = vec!["for-each-ref", "--format=%(objectname) %(refname)"];
+        args.extend(patterns);
+        let out = self.run(&args)?;
+        Ok(out
+            .lines()
+            .filter_map(|l| {
+                let (sha, r) = l.split_once(' ')?;
+                Some((r.to_string(), sha.to_string()))
+            })
+            .collect())
+    }
+
     pub fn branch_exists(&self, branch: &str) -> bool {
         self.resolve(&format!("refs/heads/{branch}")).is_some()
     }

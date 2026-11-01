@@ -5,6 +5,7 @@
 
 use crate::layout::describe_base;
 use crate::model::{Base, State};
+use crate::status::{Statuses, shorter};
 
 pub struct Style {
     color: bool,
@@ -49,8 +50,8 @@ struct Line {
     notes: Vec<(bool, String)>,
 }
 
-pub fn render(st: &State, current: Option<&str>, style: &Style) -> String {
-    rows(st, current, style)
+pub fn render(st: &State, current: Option<&str>, status: &Statuses, style: &Style) -> String {
+    rows(st, current, status, style)
         .into_iter()
         .map(|(_, text)| text + "\n")
         .collect()
@@ -58,7 +59,12 @@ pub fn render(st: &State, current: Option<&str>, style: &Style) -> String {
 
 /// The view as rows, each with the branch it shows (the trunk for the first
 /// row, `None` for section headers), so a picker can number them.
-pub fn rows(st: &State, current: Option<&str>, style: &Style) -> Vec<(Option<String>, String)> {
+pub fn rows(
+    st: &State,
+    current: Option<&str>,
+    status: &Statuses,
+    style: &Style,
+) -> Vec<(Option<String>, String)> {
     let mut out = vec![(Some(st.trunk.clone()), style.bold(&st.trunk))];
     if st.changes.is_empty() {
         let hint = "  (no changes yet; create one with `gh dags new <name>`)";
@@ -70,12 +76,20 @@ pub fn rows(st: &State, current: Option<&str>, style: &Style) -> Vec<(Option<Str
     let mut lines = Vec::new();
     let roots = st.roots();
     for (i, root) in roots.iter().enumerate() {
-        walk(st, root, "", i + 1 == roots.len(), current, &mut lines);
+        walk(
+            st,
+            root,
+            "",
+            i + 1 == roots.len(),
+            current,
+            status,
+            &mut lines,
+        );
     }
     sections.push((None, lines));
     for s in st.stacks.iter().filter(|s| matches!(s.base, Base::Sum(_))) {
         let mut lines = Vec::new();
-        walk(st, &s.changes[0], "", true, current, &mut lines);
+        walk(st, &s.changes[0], "", true, current, status, &mut lines);
         sections.push((
             Some(format!("parked on {}", describe_base(st, &s.base))),
             lines,
@@ -149,18 +163,27 @@ fn walk(
     indent: &str,
     last: bool,
     current: Option<&str>,
+    status: &Statuses,
     out: &mut Vec<Line>,
 ) {
     let branch = if last { "└── " } else { "├── " };
-    out.push(line(st, name, format!("{indent}{branch}"), current));
+    out.push(line(st, name, format!("{indent}{branch}"), current, status));
     let child_indent = format!("{indent}{}", if last { "    " } else { "│   " });
     let children = display_children(st, name);
     for (i, c) in children.iter().enumerate() {
-        walk(st, c, &child_indent, i + 1 == children.len(), current, out);
+        walk(
+            st,
+            c,
+            &child_indent,
+            i + 1 == children.len(),
+            current,
+            status,
+            out,
+        );
     }
 }
 
-fn line(st: &State, name: &str, prefix: String, current: Option<&str>) -> Line {
+fn line(st: &State, name: &str, prefix: String, current: Option<&str>, status: &Statuses) -> Line {
     let change = &st.changes[name];
     let mut notes = Vec::new();
     let parent = st.parent(name);
@@ -176,6 +199,27 @@ fn line(st: &State, name: &str, prefix: String, current: Option<&str>) -> Line {
     }
     if let Some(p) = st.ordering_only_parent(name) {
         notes.push((true, format!("⚠ ordered after {p} (independent)")));
+    }
+    if let Some(s) = status.of.get(name) {
+        if let Some(path) = &s.worktree {
+            let shown = match &status.here {
+                Some(here) => shorter(here, path),
+                None => path.display().to_string(),
+            };
+            let state = if s.missing {
+                " (gone)"
+            } else if s.dirty {
+                " (uncommitted)"
+            } else {
+                ""
+            };
+            notes.push((s.dirty || s.missing, format!("in {shown}{state}")));
+        }
+        if s.parent_moved {
+            notes.push((true, "needs restack".to_string()));
+        } else if s.behind_trunk {
+            notes.push((false, format!("behind {}/{}", st.remote, st.trunk)));
+        }
     }
     Line {
         prefix,
@@ -205,7 +249,7 @@ mod tests {
         add(&mut st, "docs", &[], FanIn::Linearize);
         add(&mut st, "search", &["docs", "login"], FanIn::Park);
         st.changes.get_mut("auth").unwrap().pr = Some(12);
-        let out = render(&st, Some("login"), &Style::new(false));
+        let out = render(&st, Some("login"), &Statuses::default(), &Style::new(false));
         let expected = "\
 main
 ├── ○ auth           #12

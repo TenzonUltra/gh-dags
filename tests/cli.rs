@@ -904,6 +904,68 @@ fn navigation_follows_stacks_and_crosses_spurs() {
 }
 
 #[test]
+fn view_shows_worktrees_and_pending_restacks() {
+    let sb = Sandbox::new();
+    sb.ok(&["new", "a"]);
+    sb.commit_file("a", "a\n", "a");
+    sb.ok(&["new", "b"]);
+    sb.commit_file("b", "b\n", "b");
+    sb.git(&["checkout", "-q", "main"]);
+    sb.ok(&["new", "x"]);
+    sb.commit_file("x", "x\n", "x");
+    sb.git(&["checkout", "-q", "main"]);
+    sb.ok(&["new", "y"]);
+    sb.commit_file("y", "y\n", "y");
+    sb.ok(&["move", "y", "--onto", "b"]);
+    sb.git(&["checkout", "-q", "main"]);
+    let wb = sb.worktree("wt-b", "b");
+    // a changes under b, and b's worktree has uncommitted changes.
+    sb.git(&["checkout", "-q", "a"]);
+    sb.commit_file("a2", "a2\n", "a2");
+    fs::write(wb.work.join("b"), "dirty\n").unwrap();
+
+    let view = sb.ok(&["view"]);
+    let line = |name: &str| {
+        view.lines()
+            .find(|l| l.contains(&format!(" {name} ")) || l.ends_with(&format!(" {name}")))
+            .unwrap_or_else(|| panic!("no {name} in:\n{view}"))
+            .to_string()
+    };
+    assert!(
+        line("b").contains("in ../wt-b (uncommitted)") && line("b").contains("needs restack"),
+        "{view}"
+    );
+    assert!(
+        !line("y").contains("needs restack"),
+        "only the root cause is marked:\n{view}"
+    );
+    assert!(!line("a").contains("needs restack"), "{view}");
+
+    let json: serde_json::Value = serde_json::from_str(&sb.ok(&["view", "--json"])).unwrap();
+    let c = &json["changes"];
+    assert_eq!(c["a"]["needs_restack"], false);
+    assert_eq!(c["b"]["needs_restack"], true);
+    assert_eq!(c["y"]["needs_restack"], true, "it'd move when b does");
+    assert_eq!(c["y"]["after"], "b");
+    assert_eq!(c["b"]["dirty"], true);
+    assert!(c["b"]["worktree"].as_str().unwrap().ends_with("wt-b"));
+    assert_eq!(c["a"]["head"], sb.tip("a"));
+    assert!(c["a"].get("worktree").is_none());
+
+    // Trunk moving on is shown, but not as needing a restack.
+    let other = sb.another_clone("upstream");
+    other.commit_file("up", "up\n", "upstream work");
+    other.git(&["push", "-q", "origin", "main"]);
+    sb.git(&["fetch", "-q"]);
+    let view = sb.ok(&["view"]);
+    assert!(
+        view.lines()
+            .any(|l| l.contains(" x ") && l.contains("behind origin/main")),
+        "{view}"
+    );
+}
+
+#[test]
 fn navigation_points_at_other_worktrees() {
     let sb = Sandbox::new();
     sb.ok(&["new", "a"]);

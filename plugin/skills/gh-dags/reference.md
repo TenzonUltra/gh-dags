@@ -27,7 +27,7 @@ Run `gh dags <command> --help` for the full text of any of these.
 
 | Command | What it does |
 |---|---|
-| `gh dags view [--json]` | The layout, or the full state as JSON (the default command) |
+| `gh dags view [--json]` | The layout, or the full state as JSON (the default command), with where each change stands: worktree, dirty, needs restack |
 | `gh dags up [<n>]`, `gh dags down [<n>]` | The change above or below this one |
 | `gh dags top`, `gh dags bottom`, `gh dags trunk` | The top or bottom of this stack, or the trunk |
 | `gh dags switch <change>` | Switch to a change by name |
