@@ -11,7 +11,7 @@ DAG, lays it out as stacks GitHub can show, and keeps it rebased.
 
 ```
 $ gh dags new login --on auth,theme
-layout: login on theme
+layout: login on theme ← auth, theme
 layout: theme now on auth (was main) · ordering only
 restacked theme, login
 

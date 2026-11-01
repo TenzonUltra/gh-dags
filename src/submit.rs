@@ -211,13 +211,26 @@ fn restacked(r: restack::Report, st: &State, what: &str) -> Result<()> {
 
 /// Parked changes don't get PRs. Say so, rather than skip them silently.
 fn say_what_stays_local(st: &State) -> Result<()> {
-    let order = st.topo_order()?;
-    for s in &st.stacks {
-        let Base::Sum(ms) = &s.base else {
-            continue;
+    // Each parked change under the sum nearest below it.
+    let mut groups: Vec<(Vec<String>, Vec<String>)> = Vec::new();
+    for name in st.topo_order()? {
+        let mut at = name.clone();
+        let ms = loop {
+            match st.parent(&at) {
+                Some(Base::Change(p)) => at = p,
+                Some(Base::Sum(ms)) => break ms,
+                _ => break Vec::new(),
+            }
         };
-        let under = st.subtree(&s.changes[0]);
-        let kept: Vec<&String> = order.iter().filter(|c| under.contains(*c)).collect();
+        if ms.is_empty() {
+            continue;
+        }
+        match groups.iter_mut().find(|(sum, _)| *sum == ms) {
+            Some((_, kept)) => kept.push(name),
+            None => groups.push((ms, vec![name])),
+        }
+    }
+    for (ms, kept) in groups {
         let names = kept
             .iter()
             .map(|c| c.as_str())
