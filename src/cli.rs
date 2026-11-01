@@ -193,6 +193,11 @@ enum Cmd {
         /// Open new PRs ready for review instead of as drafts
         #[arg(long)]
         ready: bool,
+        /// Push these changes over what's on the remote even though gh-dags
+        /// didn't push it, or it changed there (leased on its current tip).
+        /// An open PR for the branch comes along
+        #[arg(long, value_delimiter = ',', num_args = 1.., value_name = "CHANGES")]
+        take_over: Vec<String>,
     },
     /// Bring a DAG that gh-dags submitted (from anywhere) into this repository
     Import {
@@ -362,7 +367,10 @@ pub fn run() -> Result<()> {
             let target = (target != st.trunk).then_some(target);
             go(&repo, &st, Nav { target, note: None }, dest)
         }
-        Cmd::Submit { ready } => with_github(&repo, |st, gh| {
+        Cmd::Submit { ready, take_over } => with_github(&repo, |st, gh| {
+            for c in &take_over {
+                st.change(c)?;
+            }
             submit::submit(
                 &repo,
                 st,
@@ -370,6 +378,7 @@ pub fn run() -> Result<()> {
                 submit::Opts {
                     ready,
                     create: true,
+                    take_over,
                 },
                 &style,
             )

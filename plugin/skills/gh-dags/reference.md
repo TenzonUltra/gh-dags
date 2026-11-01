@@ -40,7 +40,7 @@ and nothing else on stdout.
 
 | Command | What it does |
 |---|---|
-| `gh dags submit [--ready]` | Push, open PRs (drafts unless `--ready`), and match GitHub's stacks to the layout |
+| `gh dags submit [--ready] [--take-over <changes>]` | Push, open PRs (drafts unless `--ready`), and match GitHub's stacks to the layout. `--take-over` pushes over a branch gh-dags didn't push, or one that diverged, and adopts its open PR |
 | `gh dags sync` | Absorb merges, take GitHub's rebases, restack, and update PRs |
 | `gh dags land <change> [--method squash\|merge\|rebase] [--local]` | Move a change and what it needs to the bottom, then merge them. If that means reordering or pushing first, it does that and asks for a second run once CI is green. `--local` only reorders |
 
@@ -53,5 +53,8 @@ and nothing else on stdout.
 - `can't go on … yet: it still has …'s commits`: a scoped restack would drop
   commits. Use the `gh dags restack <change> --downstack` it suggests.
 - `kept … local: it's parked on …`: parked changes get no PR yet.
-- `… changed both here and on GitHub`: the branch diverged. Reconcile it by
-  hand, then run `gh dags submit`.
+- `… changed both here and on GitHub`: each side has commits the other lacks.
+  The message counts them, and gives the commands to keep both or only yours.
+  Pick one with the user. (`sync` reconciles a rebase GitHub made by itself.)
+- `… is already on origin, and gh-dags never pushed it`: someone else's
+  branch. `gh dags submit --take-over <change>` replaces it; ask first.
