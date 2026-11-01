@@ -151,13 +151,15 @@ The fake `gh` keeps PRs and stacks in a JSON file and merges into the bare
 - no merging drafts, with the async merge API's failure shape;
 - a stack merge squashes each PR in a prefix, leaves the upper ones based on
   the PR below, then rebases the rest of the stack onto trunk and retargets it;
-- merged PRs report their merge commit.
+- merged PRs report their merge commit, and keep the head they merged at;
+- deleting a branch closes the open PRs based on it or from it.
 
 The fuzz drives `submit`, `land` (real merges), and `sync` through random
 layouts, reorders, fan-in across stacks, and growing spurs. After every
 `submit` it checks:
 
-- **No PR was ever implicitly merged.**
+- **No PR was ever implicitly merged**, and none was closed by a branch
+  deletion.
 - **Every PR is right:** each submittable change has an open PR with the right
   head, its physical parent as base, and dependency metadata matching the
   state.
@@ -173,10 +175,20 @@ landing change after its last push. GitHub's rebase after the merge then meets
 a local change, and `sync` has to keep that local work. These count as "kept"
 (3 by default, 11 in the long run), and every run needs at least one.
 
+Half the lands pass `--delete-merged`, preferring one that leaves a spur PR
+based on a branch that lands, so `sync` has to retarget that PR before the
+branch goes. After each, every landed branch has to be gone here and on
+origin, except one the fuzz gave a commit after it landed, which has to stay
+here. Those commits come at random between rounds, each followed by
+`sync --delete-merged`. Without the flag, a land keeps its branches. Deleted
+branches: 10 by default, 144 in the long run; kept for commits that didn't
+land: 2 and 17; lands that retargeted a spur PR off a landing branch first:
+0 and 12, so only the long run and an end-to-end test cover that.
+
 | Run | Submits | Stack rebuilds | Spur stacks | Merged | Multi-PR merges | PR-less inserts under a stack |
 |---|---|---|---|---|---|---|
 | default (3 seeds × 6 rounds) | 18 | 3 | 3 | 14 | 6 | 2 |
-| long (12 seeds × 12 rounds) | 144 | 40 | 50 | 138 | 63 | 26 |
+| long (12 seeds × 12 rounds) | 144 | 35 | 35 | 175 | 65 | 20 |
 
 ## 4. Does it catch bugs?
 
@@ -198,6 +210,8 @@ earlier, put back).
 | Absorb only PRs based on trunk | §3, after multi-PR merges were added | a merged change still tracked, holding others' files |
 | Unstack only what the plan rebuilds | §3, after PR-less inserts under stacks were added | GitHub's 422: a stacked PR's base can't change |
 | `sync` calls every branch changed on both sides diverged (the bug from real use) | §3, after branches above a land were changed locally | `land c1 failed: … changed both here and on GitHub` |
+| `--delete-merged` deletes before `sync` retargets, and doesn't check for PRs based on the branch | §3 long run, and an end-to-end test (the default fuzz never lands under a spur with the flag) | `deleting a branch closed [6]` |
+| `--delete-merged` deletes a branch with commits that didn't land | §3 | `sync --delete-merged after a commit on c7` |
 | A worktree's branch moves without the worktree following | §2 | `c1's worktree has status "D  c0.txt"` |
 | A dirty worktree's branch is moved anyway | §2 | `c1 moved, though a dirty worktree holds it back` |
 | Clean worktrees are treated as dirty | §2 | `c1 was skipped, but no dirty worktree has it` |

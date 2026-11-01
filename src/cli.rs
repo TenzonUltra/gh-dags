@@ -267,7 +267,12 @@ enum Cmd {
         all: bool,
     },
     /// Absorb merges from GitHub, restack, and update PRs and stacks
-    Sync,
+    Sync {
+        /// Delete the branches of changes that landed, here and on GitHub
+        /// (default: the gh-dags.deleteMerged git setting)
+        #[arg(long)]
+        delete_merged: bool,
+    },
     /// Move a change and what it needs to the bottom of its stack, then merge
     /// them once GitHub has seen exactly that
     Land {
@@ -279,6 +284,10 @@ enum Cmd {
         /// Only reorder and restack locally; don't push or merge
         #[arg(long)]
         local: bool,
+        /// Delete the branches that landed, here and on GitHub (default: the
+        /// gh-dags.deleteMerged git setting)
+        #[arg(long, conflicts_with = "local")]
+        delete_merged: bool,
     },
 }
 
@@ -447,7 +456,10 @@ pub fn run() -> Result<()> {
                 &style,
             )
         }),
-        Cmd::Sync => with_github(&repo, |st, gh| submit::sync(&repo, st, gh, &style)),
+        Cmd::Sync { delete_merged } => {
+            let delete = deletes_merged(&repo, delete_merged)?;
+            with_github(&repo, |st, gh| submit::sync(&repo, st, gh, delete, &style))
+        }
         Cmd::Checkout { pr, dest } => with_github(&repo, |st, gh| {
             let tracked = |st: &State| {
                 st.changes
@@ -492,9 +504,13 @@ pub fn run() -> Result<()> {
             change,
             method,
             local: false,
-        } => with_github(&repo, |st, gh| {
-            submit::land(&repo, st, gh, &change, method.as_deref(), &style)
-        }),
+            delete_merged,
+        } => {
+            let delete = deletes_merged(&repo, delete_merged)?;
+            with_github(&repo, |st, gh| {
+                submit::land(&repo, st, gh, &change, method.as_deref(), delete, &style)
+            })
+        }
         cmd => {
             if repo.has_journal() {
                 bail!(
@@ -623,6 +639,22 @@ fn pick(repo: &Repo, st: &State, style: &Style) -> Result<String> {
         return Ok(answer.to_string());
     }
     bail!("no change {answer:?}");
+}
+
+/// `--delete-merged`, or else the `gh-dags.deleteMerged` git setting.
+fn deletes_merged(repo: &Repo, flag: bool) -> Result<bool> {
+    if flag {
+        return Ok(true);
+    }
+    let key = "gh-dags.deleteMerged";
+    let out = repo
+        .git
+        .exec(&["config", "--type=bool", "--get", key], None, &[])?;
+    // Unset exits 1 quietly; a value that isn't a boolean says so.
+    if !out.ok && !out.stderr.trim().is_empty() {
+        bail!("{key}: {}", out.stderr.trim());
+    }
+    Ok(out.ok && out.stdout.trim() == "true")
 }
 
 fn with_github(repo: &Repo, f: impl FnOnce(&mut State, &Gh) -> Result<()>) -> Result<()> {
@@ -787,7 +819,7 @@ fn mutate(repo: &Repo, st: &mut State, cmd: Cmd) -> Result<()> {
         | Cmd::View { .. }
         | Cmd::Restack { .. }
         | Cmd::Submit { .. }
-        | Cmd::Sync
+        | Cmd::Sync { .. }
         | Cmd::Up { .. }
         | Cmd::Down { .. }
         | Cmd::Top { .. }

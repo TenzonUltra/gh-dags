@@ -4,8 +4,10 @@
 It keeps PRs and stacks in a JSON file ($FAKE_GH_DB) and performs merges on a
 local bare repository ($FAKE_GH_ORIGIN), imitating the GitHub behaviour gh-dags
 relies on: a stack needs at least two PRs, each PR's base must be the head of
-the one below, a stacked PR's base can't be changed, and merging the bottom of
-a stack squash-merges it and rebases the rest onto trunk.
+the one below, a stacked PR's base can't be changed, merging the bottom of a
+stack squash-merges it and rebases the rest onto trunk, a merged PR keeps the
+head it merged at, and deleting a branch closes the open PRs based on it or
+from it.
 """
 import json
 import os
@@ -126,6 +128,7 @@ def squash(db, p):
     git("update-ref", "refs/heads/" + TRUNK, commit)
     p["merged"], p["state"] = True, "closed"
     p["merge_commit"] = commit
+    p["merged_head"] = tip(p["head"])
 
 
 def merge(db, number):
@@ -166,9 +169,16 @@ def is_ancestor(a, b):
 
 
 def implicit_merges(db):
-    """GitHub marks an open PR merged once its base branch contains its head."""
+    """GitHub marks an open PR merged once its base branch contains its head,
+    and closes it once either branch is deleted (even when the base's own PR
+    merged)."""
     for p in db["prs"].values():
-        if p["state"] == "open" and branch_exists(p["base"]) and is_ancestor(tip(p["head"]), tip(p["base"])):
+        if p["state"] != "open":
+            continue
+        if not (branch_exists(p["base"]) and branch_exists(p["head"])):
+            p["state"] = "closed"
+            db.setdefault("closed_by_deletion", []).append(p["number"])
+        elif is_ancestor(tip(p["head"]), tip(p["base"])):
             p["merged"], p["state"] = True, "closed"
             db.setdefault("implicitly_merged", []).append(p["number"])
 
@@ -186,10 +196,11 @@ def api(method, path, body):
     out = None
     if rest == ["pulls"] and method == "GET":
         head = query["head"][0].split(":", 1)[1] if "head" in query else None
+        base = query["base"][0] if "base" in query else None
         out = [
             {"number": p["number"]}
             for p in db["prs"].values()
-            if (head is None or p["head"] == head) and p["state"] == "open"
+            if (head is None or p["head"] == head) and (base is None or p["base"] == base) and p["state"] == "open"
         ]
     elif rest == ["pulls"] and method == "POST":
         for b in (body["head"], body["base"]):
@@ -277,7 +288,7 @@ def graphql(query):
             "isDraft": p["draft"],
             "baseRefName": p["base"],
             "headRefName": p["head"],
-            "headRefOid": tip(p["head"]) if branch_exists(p["head"]) else "",
+            "headRefOid": p.get("merged_head") or (tip(p["head"]) if branch_exists(p["head"]) else ""),
             "mergeCommit": {"oid": p["merge_commit"]} if p.get("merge_commit") else None,
             "body": p["body"],
             "url": "https://github.com/%s/%s/pull/%s" % (OWNER, NAME, n),

@@ -71,6 +71,8 @@ gh dags land <change>
 Also: `view`, `track`, `untrack`, `link`, `unlink`, `move`, `restack`, `switch`,
 `up`, `down`, `top`, `bottom`, `trunk`, `completion <fish|zsh|bash>`,
 `import` (rebuild a submitted DAG on another clone), `checkout <pr>`.
+`sync` and `land` take `--delete-merged` to delete landed branches here and
+on GitHub (`git config gh-dags.deleteMerged true` makes it the default).
 For a worktree per change, `gh dags new <name> --worktree <path>`, and
 navigation takes `--print-path`: `cd "$(gh dags up --print-path)"`.
 

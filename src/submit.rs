@@ -494,7 +494,15 @@ pub fn submit(repo: &Repo, st: &mut State, gh: &Gh, opts: Opts, style: &Style) -
     Ok(())
 }
 
-pub fn sync(repo: &Repo, st: &mut State, gh: &Gh, style: &Style) -> Result<()> {
+/// `delete_merged`: delete the branches of changes that landed, here and on
+/// the remote, once nothing would be lost (see `delete_landed`).
+pub fn sync(
+    repo: &Repo,
+    st: &mut State,
+    gh: &Gh,
+    delete_merged: bool,
+    style: &Style,
+) -> Result<()> {
     let git = &repo.git;
     git.run(&["fetch", "--quiet", "--prune", &st.remote])?;
 
@@ -522,7 +530,12 @@ pub fn sync(repo: &Repo, st: &mut State, gh: &Gh, style: &Style) -> Result<()> {
         };
         match pr.state.as_str() {
             "MERGED" if landed => match layout::absorb_merged(st, &name) {
-                Ok(()) => merged.push(name),
+                Ok(()) => {
+                    if !pr.head_sha.is_empty() {
+                        st.landed.insert(name.clone(), pr.head_sha.clone());
+                    }
+                    merged.push(name)
+                }
                 Err(e) => println!(
                     "{} #{n} ({name}) merged, but {e:#}",
                     style.yellow("warning:")
@@ -548,7 +561,11 @@ pub fn sync(repo: &Repo, st: &mut State, gh: &Gh, style: &Style) -> Result<()> {
         }
     }
     for name in &merged {
-        println!("merged: {name} (delete the branch with `git branch -D {name}`)");
+        if delete_merged {
+            println!("merged: {name}");
+        } else {
+            println!("merged: {name} (`gh dags sync --delete-merged` deletes its branch)");
+        }
     }
     // sync only updates PRs; opening new ones is submit's job.
     for name in parked_before
@@ -671,7 +688,78 @@ pub fn sync(repo: &Repo, st: &mut State, gh: &Gh, style: &Style) -> Result<()> {
             style,
         )?;
     }
+    delete_landed(repo, st, gh, delete_merged, style)?;
+    repo.save(st)?;
     println!("in sync with {}", st.remote);
+    Ok(())
+}
+
+/// Delete the branches of landed changes, here and on the remote, where
+/// nothing that didn't land goes with them: the branch is (an ancestor of)
+/// the head its PR merged at, and no worktree has it checked out. Runs after
+/// submit retargeted the PRs based on them, since deleting a PR's base
+/// closes the PR. Landed branches are remembered until they're gone, so a
+/// sync that stopped early, or a later `--delete-merged`, still gets them.
+fn delete_landed(repo: &Repo, st: &mut State, gh: &Gh, delete: bool, style: &Style) -> Result<()> {
+    let git = &repo.git;
+    for (name, merged) in std::mem::take(&mut st.landed) {
+        let local = git.resolve(&format!("refs/heads/{name}"));
+        let remote = git.resolve(&format!("refs/remotes/{}/{name}", st.remote));
+        // Gone, or the name is a new change's now.
+        if (local.is_none() && remote.is_none()) || st.has(&name) {
+            continue;
+        }
+        if !delete {
+            st.landed.insert(name, merged);
+            continue;
+        }
+        // Kept for later: what's only kept for now.
+        let mut later = false;
+        let mut deleted = Vec::new();
+        if let Some(local) = local {
+            if !git.is_ancestor(&local, &merged) {
+                println!("kept {name}: it has commits that didn't land");
+            } else if let Some(path) = worktree::checkout_of(git, &name)? {
+                println!("kept {name}: it's checked out in {}", path.display());
+                later = true;
+            } else {
+                git.run(&["update-ref", "-d", &format!("refs/heads/{name}"), &local])?;
+                deleted.push("here".to_string());
+            }
+        }
+        if let Some(remote) = remote {
+            if !git.is_ancestor(&remote, &merged) {
+                println!(
+                    "kept {name} on {}: it has commits that didn't land",
+                    st.remote
+                );
+            } else if let Some(n) = gh.open_prs_on(&name)?.first() {
+                println!("kept {name} on {}: #{n} is based on it", st.remote);
+                later = true;
+            } else {
+                let lease = format!("--force-with-lease=refs/heads/{name}:{remote}");
+                let gone = format!(":refs/heads/{name}");
+                let out = git.exec(&["push", "--quiet", &lease, &st.remote, &gone], None, &[])?;
+                if out.ok {
+                    deleted.push(format!("on {}", st.remote));
+                } else {
+                    println!(
+                        "{} {name} wasn't deleted on {}: {}",
+                        style.yellow("warning:"),
+                        st.remote,
+                        out.stderr.trim()
+                    );
+                    later = true;
+                }
+            }
+        }
+        if !deleted.is_empty() {
+            println!("deleted {name} {}", deleted.join(" and "));
+        }
+        if later {
+            st.landed.insert(name, merged);
+        }
+    }
     Ok(())
 }
 
@@ -805,6 +893,7 @@ pub fn land(
     gh: &Gh,
     change: &str,
     method: Option<&str>,
+    delete_merged: bool,
     style: &Style,
 ) -> Result<()> {
     let before = st.clone();
@@ -876,7 +965,7 @@ pub fn land(
     match status {
         MergeStatus::Merged => {
             println!("merged #{n}");
-            sync(repo, st, gh, style)
+            sync(repo, st, gh, delete_merged, style)
         }
         MergeStatus::Enqueued => {
             println!("#{n} is in the merge queue; run `gh dags sync` once it lands");
