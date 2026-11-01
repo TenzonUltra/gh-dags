@@ -147,7 +147,8 @@ The fake `gh` keeps PRs and stacks in a JSON file and merges into the bare
 
 - implicit merges (a PR whose base contains its head counts as merged);
 - no retargeting while stacked;
-- a stack needs at least two PRs, chained base to head;
+- a stack needs at least two PRs, chained base to head, and what's added
+  chains onto its last PR, even a closed one;
 - no merging drafts, with the async merge API's failure shape;
 - a stack merge squashes each PR in a prefix, leaves the upper ones based on
   the PR below, then rebases the rest of the stack onto trunk and retargets it;

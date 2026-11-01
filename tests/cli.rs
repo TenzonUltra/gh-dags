@@ -1342,6 +1342,48 @@ fn landed_branches_are_deleted_once_nothing_is_based_on_them() {
 }
 
 #[test]
+fn a_stack_whose_top_pr_was_closed_is_rebuilt_to_grow() {
+    let sb = Sandbox::new();
+    for c in ["a", "b", "c"] {
+        sb.ok(&["new", c]);
+        sb.commit_file(c, "x\n", c);
+    }
+    sb.ok(&["submit"]);
+    assert_eq!(sb.stack(1), [1, 2, 3]);
+
+    // Close c's PR on GitHub and put d where c was.
+    let mut close = command("gh", &sb.work, sb._tmp.path())
+        .args([
+            "api",
+            "--method",
+            "PATCH",
+            "repos/acme/widgets/pulls/3",
+            "--input",
+            "-",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    close
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"state": "closed"}"#)
+        .unwrap();
+    assert!(close.wait().unwrap().success());
+    sb.ok(&["untrack", "c"]);
+    sb.ok(&["new", "d", "--on", "b"]);
+    sb.commit_file("d", "x\n", "d");
+
+    // GitHub chains a stack's new PRs onto its last one, closed or not.
+    let out = sb.ok(&["submit"]);
+    assert!(out.contains("stack #2: #1 ← #2 ← #4"), "{out}");
+    assert_eq!(sb.stack(2), [1, 2, 4]);
+}
+
+#[test]
 fn completion_offers_names_from_the_repo() {
     let sb = Sandbox::new();
     forked(&sb);

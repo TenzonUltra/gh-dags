@@ -76,14 +76,19 @@ pub fn plan_stacks(desired: &[Desired], remote: &[RemoteStack]) -> Plan {
         if touching.len() == 1 {
             let r = touching.values().next().unwrap();
             let open: Vec<u64> = r.prs.iter().filter(|(_, o)| *o).map(|(n, _)| *n).collect();
+            // GitHub chains what's added onto the stack's last PR, even a
+            // closed one, so a stack with a closed top can't grow.
+            let top_open = r.prs.last().is_some_and(|(_, o)| *o);
             if r.base == d.base && d.prs.starts_with(&open) {
-                let action = if open.len() == d.prs.len() {
-                    Action::Keep(r.number)
-                } else {
-                    Action::Append(r.number, d.prs[open.len()..].to_vec())
-                };
-                plan.actions.push((d.stack, action));
-                continue;
+                if open.len() == d.prs.len() {
+                    plan.actions.push((d.stack, Action::Keep(r.number)));
+                    continue;
+                }
+                if top_open {
+                    let more = d.prs[open.len()..].to_vec();
+                    plan.actions.push((d.stack, Action::Append(r.number, more)));
+                    continue;
+                }
             }
         }
         plan.unstack.extend(touching.keys());
@@ -1010,6 +1015,17 @@ mod tests {
         let plan = plan_stacks(&[want(0, "main", &[2, 3, 4, 5])], &r);
         assert_eq!(plan.actions, [(0, Action::Append(7, vec![4, 5]))]);
         assert!(plan.unstack.is_empty());
+    }
+
+    #[test]
+    fn a_stack_whose_top_was_closed_is_rebuilt_to_grow() {
+        let r = [remote(7, "main", &[(1, true), (2, true), (3, false)])];
+        let plan = plan_stacks(&[want(0, "main", &[1, 2])], &r);
+        assert_eq!(plan.actions, [(0, Action::Keep(7))]);
+
+        let plan = plan_stacks(&[want(0, "main", &[1, 2, 4])], &r);
+        assert_eq!(plan.unstack, BTreeSet::from([7]));
+        assert_eq!(plan.actions, [(0, Action::Create(vec![1, 2, 4]))]);
     }
 
     #[test]

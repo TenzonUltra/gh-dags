@@ -413,6 +413,9 @@ version):
   because the pull request is part of a stack"). Unstack first.
 - **A stack needs at least two PRs** (from the `gh stack` source). A one-change
   stack stays a plain PR.
+- **A closed PR stays in its stack, and a PR added to a stack must be based on
+  the head of its last PR**, closed or not (found in real use, Nov 2026). So a
+  stack whose top was closed can't grow; `submit` rebuilds it instead.
 - **Implicit merges.** A PR whose base comes to contain its head is marked
   merged. This drives the order of steps in §6. `sync` forgets a PR that was
   marked merged into a non-trunk branch, so the next `submit` opens a new one.

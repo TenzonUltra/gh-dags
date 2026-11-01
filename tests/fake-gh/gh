@@ -228,6 +228,9 @@ def api(method, path, body):
         for k in ("base", "body", "title"):
             if k in body:
                 p[k] = body[k]
+        # A closed PR stays in its stack, as on GitHub.
+        if body.get("state") == "closed" and p["state"] == "open":
+            p["state"] = "closed"
         out = {"number": p["number"]}
     elif rest == ["stacks"] and method == "GET":
         out = [stack_json(db, s) for s in db["stacks"].values()]
