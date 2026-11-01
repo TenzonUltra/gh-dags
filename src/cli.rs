@@ -43,6 +43,29 @@ enum SkillCmd {
     },
 }
 
+/// Whether a layout command moves branches now.
+#[derive(clap::Args)]
+struct Later {
+    /// Only record the layout change, and move the branches later with
+    /// `gh dags restack`
+    #[arg(long)]
+    no_restack: bool,
+}
+
+impl Cmd {
+    /// A layout command run with `--no-restack`.
+    fn no_restack(&self) -> bool {
+        match self {
+            Cmd::New { later, .. }
+            | Cmd::Track { later, .. }
+            | Cmd::Link { later, .. }
+            | Cmd::Unlink { later, .. }
+            | Cmd::Move { later, .. } => later.no_restack,
+            _ => false,
+        }
+    }
+}
+
 /// Where a navigation command lands.
 #[derive(clap::Args)]
 struct Dest {
@@ -78,6 +101,8 @@ enum Cmd {
         /// Create the branch without switching to it
         #[arg(long)]
         no_checkout: bool,
+        #[command(flatten)]
+        later: Later,
     },
     /// Track an existing branch as a change
     Track {
@@ -87,6 +112,8 @@ enum Cmd {
         on: Option<Vec<String>>,
         #[arg(long)]
         park: bool,
+        #[command(flatten)]
+        later: Later,
     },
     /// Stop tracking a change (the branch is kept)
     Untrack { change: String },
@@ -95,18 +122,24 @@ enum Cmd {
         change: String,
         #[arg(required = true)]
         deps: Vec<String>,
+        #[command(flatten)]
+        later: Later,
     },
     /// Remove dependencies (the layout stays put)
     Unlink {
         change: String,
         #[arg(required = true)]
         deps: Vec<String>,
+        #[command(flatten)]
+        later: Later,
     },
     /// Put a change, and everything on it, onto another change or the trunk
     Move {
         change: String,
         #[arg(long)]
         onto: String,
+        #[command(flatten)]
+        later: Later,
     },
     /// Show the layout (the default command)
     View {
@@ -438,8 +471,9 @@ pub fn run() -> Result<()> {
             }
             let mut st = repo.load()?;
             let before = st.clone();
+            let now = !cmd.no_restack();
             mutate(&repo, &mut st, cmd)?;
-            settle(&repo, &before, &mut st, &style)
+            settle(&repo, &before, &mut st, now, &style)
         }
     }
 }
@@ -588,6 +622,7 @@ fn mutate(repo: &Repo, st: &mut State, cmd: Cmd) -> Result<()> {
             park,
             message,
             no_checkout,
+            ..
         } => {
             if git.branch_exists(&name) {
                 bail!("branch {name:?} already exists; use `gh dags track {name}`");
@@ -632,7 +667,9 @@ fn mutate(repo: &Repo, st: &mut State, cmd: Cmd) -> Result<()> {
                 return Err(e.context(format!("{name} wasn't created")));
             }
         }
-        Cmd::Track { branch, on, park } => {
+        Cmd::Track {
+            branch, on, park, ..
+        } => {
             if !git.branch_exists(&branch) {
                 bail!("branch {branch:?} doesn't exist");
             }
@@ -653,17 +690,17 @@ fn mutate(repo: &Repo, st: &mut State, cmd: Cmd) -> Result<()> {
             st.change_mut(&branch)?.fork = fork;
         }
         Cmd::Untrack { change } => layout::untrack(st, &change)?,
-        Cmd::Link { change, deps } => {
+        Cmd::Link { change, deps, .. } => {
             for d in deps {
                 layout::link(st, &change, &d)?;
             }
         }
-        Cmd::Unlink { change, deps } => {
+        Cmd::Unlink { change, deps, .. } => {
             for d in deps {
                 layout::unlink(st, &change, &d)?;
             }
         }
-        Cmd::Move { change, onto } => {
+        Cmd::Move { change, onto, .. } => {
             let onto = if onto == st.trunk {
                 Base::Trunk
             } else {
@@ -699,7 +736,7 @@ fn mutate(repo: &Repo, st: &mut State, cmd: Cmd) -> Result<()> {
 }
 
 /// Save, print what moved, and restack if existing changes moved.
-fn settle(repo: &Repo, before: &State, st: &mut State, style: &Style) -> Result<()> {
+fn settle(repo: &Repo, before: &State, st: &mut State, now: bool, style: &Style) -> Result<()> {
     repo.save(st)?;
     let moves = layout::describe_moves(before, st);
     for m in &moves {
@@ -708,13 +745,32 @@ fn settle(repo: &Repo, before: &State, st: &mut State, style: &Style) -> Result<
     if !others_moved(before, st) {
         return Ok(());
     }
+    if !now {
+        println!("branches weren't moved (--no-restack); run `gh dags restack` when ready");
+        return Ok(());
+    }
     if !repo.git.is_clean()? {
         println!(
             "uncommitted changes, so branches weren't moved yet; run `gh dags restack` when ready"
         );
         return Ok(());
     }
-    report(restack::start(repo, st, &restack::Scope::default())?)
+    // Only what the layout change moved, and what's on it. Other stacks stay
+    // where they are; `sync` and `restack` catch them up to trunk.
+    let moved: BTreeSet<String> = before
+        .changes
+        .keys()
+        .filter(|c| st.has(c) && before.parent(c) != st.parent(c))
+        .flat_map(|c| st.subtree(c))
+        .collect();
+    report(restack::start(
+        repo,
+        st,
+        &restack::Scope {
+            only: Some(moved),
+            no_trunk: false,
+        },
+    )?)
 }
 
 fn report(outcome: Outcome) -> Result<()> {
@@ -724,6 +780,9 @@ fn report(outcome: Outcome) -> Result<()> {
                 println!("restacked {}", r.moved.join(", "));
             } else if r.blocked.is_empty() {
                 println!("everything is already in place");
+            }
+            for (name, path) in &r.followed {
+                println!("{name}'s worktree in {} moved with it", path.display());
             }
             for b in &r.blocked {
                 println!("{}", b.describe());

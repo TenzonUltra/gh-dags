@@ -89,11 +89,18 @@ After every full restack, **every branch** must satisfy:
   commits start.
 - **Stability.** Restacking again moves nothing.
 
+After *every* command (outside a stopped restack), every change still has
+exactly its own commits on top, starting at its recorded fork point, wherever
+it sits: restacked, held back, or waiting for a restack.
+
 After `restack --upstack/--downstack`, branches outside the scope must not have
-moved, and everything inside it must be placed correctly. It may refuse to put
-a change on a parent outside the scope that still has the change's commits.
-Then that parent, or something under it, must really be out of place, and
-nothing may have moved.
+moved, and everything inside it must be placed correctly. A scoped restack may
+hold back a change whose parent outside the scope still has the change's
+commits. Then that parent, or something under it, must really be out of place.
+
+After a layout command (`new`, `link`, `unlink`, `move`, `land --local`), every
+change whose parent it changed, and what's stacked on those, must be placed
+correctly, and nothing else may have moved.
 
 **Worktrees.** After every step, each worktree is still on its change. A clean
 one has a clean status, so its files are the new tip's. A dirty one still has
@@ -126,7 +133,7 @@ almost never built parked changes or legal move-downs (§4).
 | Run | Full checks | Scoped | Parked | Move-downs | Hoists | Merges | Moved in worktrees | Held back |
 |---|---|---|---|---|---|---|---|---|
 | default (10 seeds × 60 steps) | 89 | 37 | 23 | 26 | 22 | 18 | 108 | 34 |
-| long (40 seeds × 80 steps) | 455 | 258 | 70 | 139 | 140 | 76 | 452 | 527 |
+| long (40 seeds × 80 steps) | 455 | 259 | 83 | 139 | 137 | 74 | 437 | 440 |
 
 Conflicts: 12 seeds by default (5 aborted, 5 continued, 5 in other
 worktrees); 80 in the long run (32 aborted, 44 continued, 31 in other
@@ -195,6 +202,8 @@ earlier, put back).
 | A dirty worktree's branch is moved anyway | §2 | `c1 moved, though a dirty worktree holds it back` |
 | Clean worktrees are treated as dirty | §2 | `c1 was skipped, but no dirty worktree has it` |
 | A dirty change is skipped, but not what's stacked on it | §2 | `c3 moved, though a dirty worktree holds it back` |
+| Layout commands restack every change again (the old behavior) | §2 | `c0 moved, though gh dags new c4 --on c0,c1 didn't move it` |
+| A scoped restack checks only ancestry, not copies of the change's commits in its parent (the bug the long run found) | §2 long run (seed 1019), then an end-to-end test | `after gh dags restack c4 --upstack, c4's top commits are ["c6 v3", "c4 v2", "c4 v3"]` |
 | A conflict rebase runs at home, not in the change's worktree | §2, rebase path | restack failed: git won't check out a branch another worktree has |
 | `--abort` moves refs back without their worktrees following | §2 conflicts, after trunk moves were added | `c0's worktree has status "A  main.txt"` |
 | `--continue` resumes the rebase in the wrong worktree | §2 conflicts | `--continue` failed |
@@ -223,6 +232,13 @@ Two of these needed the checks themselves fixed first:
   then put `x` on a parent that still had `x`'s commits, and the replay dropped
   them as already applied. The worktree fuzz found it, and it reproduced on
   `main` with a dirty home worktree. A scoped restack now refuses that case.
+- **A scoped restack could still drop a commit.** The fix above compared
+  ancestry only. A parent held back by a dirty worktree can keep an *old copy*
+  of a change's commit after the change itself was restacked: a different
+  commit with the same patch. Replaying onto it dropped the commit as already
+  applied. The long fuzz found it once layout commands stopped restacking
+  everything (seed 1019). A scoped restack now also holds back a change whose
+  parent has copies of its commits (`git rev-list --cherry-mark`).
 - **`--park` was silently ignored** when the deps were already in one line. It
   now says so.
 - **`sync` said nothing** when a merge unparked a change that has no PR yet. It

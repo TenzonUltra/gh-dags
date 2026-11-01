@@ -59,8 +59,10 @@ Doing these by hand to a tracked branch works against gh-dags:
   The extra order is marked ⚠ in `gh dags view` and isn't a real dependency.
   `--park` instead keeps the change local, on a merge of its deps. A parked
   change gets no PR until all but one of its deps have landed.
-- Layout changes restack right away. With uncommitted changes in the current
-  worktree they don't, so run `gh dags restack` once it's clean.
+- Layout changes restack what they moved right away, and leave other stacks
+  alone. `--no-restack` only records the change. With uncommitted changes in
+  the current worktree they don't restack either, so run `gh dags restack`
+  once it's clean.
 - `gh dags track <branch>` adopts an existing branch. If it says the deps are
   ambiguous, pass `--on`.
 
@@ -88,7 +90,9 @@ Doing these by hand to a tracked branch works against gh-dags:
   change.
 - So a restack you run can change files in a worktree that another person or
   agent is using. Check with the user before restacking changes that someone
-  else has checked out.
+  else has checked out, and use `--no-restack` on a layout change meanwhile.
+  The restack names each worktree it moved: `x's worktree in /path moved with
+  it`.
 - `gh dags up`, `down`, `top`, `bottom`, and `switch <change>` switch the
   current worktree. Always give `switch` a name, since without one it waits
   for input. If the change is checked out elsewhere, the command says where,

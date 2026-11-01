@@ -286,7 +286,12 @@ fn restack_carries_other_worktrees_along() {
 
         sb.commit_file("a2", "a2\n", "a2");
         let out = sb.ok(&["restack"]);
-        assert!(out.contains("restacked b"), "{out}");
+        assert!(
+            out.contains("restacked b")
+                && out.contains("b's worktree in ")
+                && out.contains("moved with it"),
+            "{out}"
+        );
         assert_eq!(sb.own_commits("a", "b"), ["b"]);
         assert_eq!(wt.branch(), "b");
         assert_eq!(wt.status(), "", "the worktree follows its branch");
@@ -1007,9 +1012,9 @@ fn scoped_restack_waits_for_a_stale_parent() {
     sb.git(&["checkout", "--", "README"]);
     let (a, b) = (sb.tip("a"), sb.tip("b"));
 
-    let (ok, out) = sb.dags(&["restack", "a", "--upstack"]);
+    let out = sb.ok(&["restack", "a", "--upstack"]);
     assert!(
-        !ok && out.contains("a can't go on b yet: it still has a's commits"),
+        out.contains("skipped a: a can't go on b yet: it still has a's commits"),
         "{out}"
     );
     assert_eq!((sb.tip("a"), sb.tip("b")), (a, b));
@@ -1070,6 +1075,101 @@ fn older_gits_restack_with_rebase_or_are_turned_away() {
         !ok && out.contains("needs git 2.38 or newer, and this is git 2.34"),
         "{out}"
     );
+}
+
+#[test]
+fn layout_commands_restack_only_what_they_move() {
+    let sb = Sandbox::new();
+    sb.ok(&["new", "a"]);
+    sb.commit_file("a", "a\n", "a");
+    sb.git(&["checkout", "-q", "main"]);
+    sb.ok(&["new", "c"]);
+    sb.commit_file("c", "c\n", "c");
+    sb.git(&["checkout", "-q", "main"]);
+    sb.ok(&["new", "x"]);
+    sb.commit_file("x", "x\n", "x");
+    // Trunk moves on; only `sync` and `restack` catch up to it.
+    let other = sb.another_clone("upstream");
+    other.commit_file("up", "up\n", "upstream work");
+    other.git(&["push", "-q", "origin", "main"]);
+    sb.git(&["fetch", "-q"]);
+    let (a, x) = (sb.tip("a"), sb.tip("x"));
+
+    let out = sb.ok(&["move", "c", "--onto", "a", "--no-restack"]);
+    assert!(
+        out.contains("branches weren't moved (--no-restack)"),
+        "{out}"
+    );
+    assert_eq!(sb.own_commits("main", "c"), ["c"], "c didn't move yet");
+    sb.ok(&["move", "c", "--onto", "main"]);
+    let out = sb.ok(&["move", "c", "--onto", "a"]);
+    assert!(out.contains("restacked c"), "{out}");
+    assert_eq!((sb.tip("a"), sb.tip("x")), (a, x), "a and x stay put");
+    assert_eq!(sb.own_commits("a", "c"), ["c"]);
+    let out = sb.ok(&["restack"]);
+    assert!(
+        out.contains("restacked a, c, x") || out.contains("restacked a, x, c"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_parent_with_old_copies_of_a_changes_commits_holds_it_back() {
+    // main ← c ← p, with p held back by a dirty worktree while trunk moves,
+    // so c's commit is restacked and p keeps the old copy.
+    let sb = Sandbox::new();
+    sb.ok(&["new", "c"]);
+    sb.commit_file("c", "c\n", "c");
+    sb.ok(&["new", "p"]);
+    sb.commit_file("p", "p\n", "p");
+    sb.git(&["checkout", "-q", "main"]);
+    let wp = sb.worktree("wt-p", "p");
+    fs::write(wp.work.join("p"), "dirty\n").unwrap();
+    let other = sb.another_clone("upstream");
+    other.commit_file("up", "up\n", "upstream work");
+    other.git(&["push", "-q", "origin", "main"]);
+    sb.git(&["fetch", "-q"]);
+    sb.ok(&["restack"]);
+    // Flip them: p onto main (held back, still dirty), then c onto p, which
+    // still has the old copy of c's commit.
+    sb.ok(&["unlink", "p", "c"]);
+    sb.ok(&["move", "p", "--onto", "main"]);
+    let c = sb.tip("c");
+    let out = sb.ok(&["move", "c", "--onto", "p"]);
+    assert!(
+        out.contains("skipped c: c can't go on p yet: it still has c's commits"),
+        "{out}"
+    );
+    assert_eq!(sb.tip("c"), c);
+    // Once p is clean, everything lands where it should.
+    wp.git(&["checkout", "--", "p"]);
+    sb.ok(&["restack"]);
+    assert_eq!(sb.own_commits("origin/main", "p"), ["p"]);
+    assert_eq!(sb.own_commits("p", "c"), ["c"]);
+}
+
+#[test]
+fn restack_never_moves_changes_onto_an_older_trunk() {
+    let sb = Sandbox::new();
+    sb.ok(&["new", "a"]);
+    sb.commit_file("a", "a\n", "a");
+    let old = sb.tip("origin/main");
+    let other = sb.another_clone("upstream");
+    other.commit_file("up", "up\n", "upstream work");
+    other.git(&["push", "-q", "origin", "main"]);
+    sb.git(&["fetch", "-q"]);
+    sb.ok(&["restack"]);
+    let a = sb.tip("a");
+    // The remote-tracking trunk falls behind where a sits.
+    sb.git(&["update-ref", "refs/remotes/origin/main", &old]);
+    let out = sb.ok(&["restack"]);
+    assert!(
+        out.contains("skipped a: origin/main is behind where a sits; fetch it"),
+        "{out}"
+    );
+    assert_eq!(sb.tip("a"), a);
+    sb.git(&["fetch", "-q"]);
+    assert!(sb.ok(&["restack"]).contains("already in place"));
 }
 
 #[test]

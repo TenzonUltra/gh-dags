@@ -145,16 +145,74 @@ impl World {
     }
 
     /// Run gh-dags. Whatever it was, it may have restacked, so check what
-    /// it held back, and keep that for the caller in `held`.
+    /// it held back, and keep that for the caller in `held`. A layout
+    /// command restacks only what it moved: those changes sit on their
+    /// parents, and nothing else moved.
     fn dags(&mut self, args: &[&str]) -> (bool, String) {
-        let before = self.tips(&self.state());
+        let was = self.state();
+        let before = self.tips(&was);
         let (ok, out) = self.sb.dags(args);
         self.log.push(format!(
             "gh dags {} -> {}",
             args.join(" "),
             if ok { "ok" } else { "rejected" }
         ));
-        self.held = self.held_back(&self.state(), &before, &out);
+        let now = self.state();
+        self.held = self.held_back(&now, &before, &out);
+        // Wherever a change sits, held back or not yet restacked, it still
+        // has exactly its own commits on top, starting at its fork point.
+        if !self.sb.work.join(".git/gh-dags/restack.json").exists() {
+            for n in now.changes.keys() {
+                let Some(own) = self.m.own.get(n) else {
+                    continue;
+                };
+                let k = own.len();
+                let subjects =
+                    self.sb
+                        .git(&["log", "--reverse", "--format=%s", "-n", &k.to_string(), n]);
+                let subjects: Vec<&str> = subjects.lines().collect();
+                if subjects != own.iter().map(String::as_str).collect::<Vec<_>>() {
+                    self.fail(&format!(
+                        "after `gh dags {}`, {n}'s top commits are {subjects:?}, expected {own:?}",
+                        args.join(" ")
+                    ));
+                }
+                let below = self.sb.tip(&format!("{n}~{k}"));
+                if now.changes[n].fork.as_deref() != Some(below.as_str()) {
+                    self.fail(&format!(
+                        "after `gh dags {}`, {n}'s fork point isn't where its commits start",
+                        args.join(" ")
+                    ));
+                }
+            }
+        }
+        let layout = matches!(args[0], "new" | "link" | "unlink" | "move")
+            || (args[0] == "land" && args.contains(&"--local"));
+        if ok && layout && !out.contains("weren't moved") {
+            let moved: BTreeSet<String> = was
+                .changes
+                .keys()
+                .filter(|c| now.has(c) && was.parent(c) != now.parent(c))
+                .flat_map(|c| now.subtree(c))
+                .filter(|c| was.has(c))
+                .collect();
+            let placed: Vec<String> = moved
+                .iter()
+                .filter(|n| !self.held.contains(*n))
+                .cloned()
+                .collect();
+            for n in &placed {
+                self.check_placement(&now, n);
+            }
+            for (n, tip) in &before {
+                if now.has(n) && !moved.contains(n) && self.sb.tip(n) != *tip {
+                    self.fail(&format!(
+                        "{n} moved, though `gh dags {}` didn't move it",
+                        args.join(" ")
+                    ));
+                }
+            }
+        }
         (ok, out)
     }
 
@@ -384,7 +442,24 @@ impl World {
                 continue;
             };
             let d = rest.split([' ', ':']).next().unwrap().to_string();
-            if !self.dirty.contains(&d) {
+            // Or it sat on a parent outside the scope that still has its
+            // commits (a skip left it, or something under it, stale). Then
+            // that really is out of place.
+            if let Some(after) = rest.split(" can't go on ").nth(1)
+                && let Some((stale, _)) = after.split_once(" yet:")
+            {
+                for p in stale.split(", ") {
+                    let below = st.phys_ancestors(p);
+                    let out_of_place = std::iter::once(p)
+                        .chain(below.iter().map(String::as_str))
+                        .any(|a| self.misplaced(st, a).is_some());
+                    if !out_of_place {
+                        self.fail(&format!(
+                            "{d} was skipped over {p}, which is in place:\n{out}"
+                        ));
+                    }
+                }
+            } else if !self.dirty.contains(&d) {
                 self.fail(&format!(
                     "{d} was skipped, but no dirty worktree has it:\n{out}"
                 ));
@@ -564,29 +639,6 @@ impl World {
         let flag = if up { "--upstack" } else { "--downstack" };
         self.cov.scoped += 1;
         let (ok, out) = self.dags(&["restack", &c, flag]);
-        // A change can't go on a parent outside the scope that still has its
-        // commits (a skip left it, or something under it, stale). Then that
-        // really is out of place, and nothing moved.
-        if !ok
-            && let Some(rest) = out.split(" can't go on ").nth(1)
-            && let Some((stale, _)) = rest.split_once(" yet:")
-        {
-            for p in stale.split(", ") {
-                let below = st.phys_ancestors(p);
-                let out_of_place = std::iter::once(p)
-                    .chain(below.iter().map(String::as_str))
-                    .any(|a| self.misplaced(st, a).is_some());
-                if scope.contains(p) || !out_of_place {
-                    self.fail(&format!(
-                        "refused over {p}, though it's in scope or in place:\n{out}"
-                    ));
-                }
-            }
-            if self.tips(st) != before {
-                self.fail("a refused restack moved something");
-            }
-            return;
-        }
         if !ok {
             self.fail(&format!("scoped restack failed:\n{out}"));
         }
