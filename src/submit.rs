@@ -26,6 +26,8 @@ pub struct Opts {
     pub ready: bool,
     /// Create PRs for changes that don't have one (sync only updates).
     pub create: bool,
+    /// Push these over the remote whatever's there (leased on its tip).
+    pub take_over: Vec<String>,
 }
 
 /// What one layout stack should look like on GitHub.
@@ -275,6 +277,7 @@ pub fn submit(repo: &Repo, st: &mut State, gh: &Gh, opts: Opts, style: &Style) -
     let remote_tips = git.remote_tips(&st.remote, &order)?;
     let mut leases = Vec::new();
     let mut stale = Vec::new();
+    let mut foreign = Vec::new();
     for name in &order {
         let local = git.branch_tip(name)?;
         let remote = remote_tips.get(name);
@@ -283,12 +286,32 @@ pub fn submit(repo: &Repo, st: &mut State, gh: &Gh, opts: Opts, style: &Style) -
             continue;
         }
         let pushed = st.changes[name].pushed.as_ref();
+        let lease = (name.clone(), remote.cloned().unwrap_or_default());
+        if opts.take_over.contains(name) {
+            leases.push(lease);
+            continue;
+        }
         // A remote tip that local already contains is safe to push over.
         match (remote, pushed) {
             (Some(r), Some(p)) if r != p && !git.is_ancestor(r, &local) => stale.push(name.clone()),
-            (Some(r), None) if !git.is_ancestor(r, &local) => stale.push(name.clone()),
-            _ => leases.push((name.clone(), remote.cloned().unwrap_or_default())),
+            (Some(r), None) if !git.is_ancestor(r, &local) => foreign.push(name.clone()),
+            _ => leases.push(lease),
         }
+    }
+    if !foreign.is_empty() {
+        let one = foreign.len() == 1;
+        bail!(
+            "{} {} already on {}, and gh-dags never pushed {}, so it won't overwrite what's \
+             there. To replace {} with yours (and take over {} open PR), run \
+             `gh dags submit --take-over {}`",
+            foreign.join(", "),
+            if one { "is" } else { "are" },
+            st.remote,
+            if one { "it" } else { "them" },
+            if one { "it" } else { "them" },
+            if one { "its" } else { "each one's" },
+            foreign.join(","),
+        );
     }
     if !stale.is_empty() {
         bail!(
@@ -528,13 +551,22 @@ pub fn sync(repo: &Repo, st: &mut State, gh: &Gh, style: &Style) -> Result<()> {
     let mut diverged = Vec::new();
     let mut held = Vec::new();
     for name in st.topo_order()? {
-        let Some(pushed) = st.changes[&name].pushed.clone() else {
-            continue;
-        };
         let Some(remote) = git.resolve(&format!("refs/remotes/{}/{name}", st.remote)) else {
             continue;
         };
         let local = git.branch_tip(&name)?;
+        let Some(pushed) = st.changes[&name].pushed.clone() else {
+            // On the remote, but not from gh-dags (someone else's branch).
+            if !st.is_parked(&name) && remote != local && !git.is_ancestor(&remote, &local) {
+                println!(
+                    "{} {name} is on {}, but gh-dags never pushed it, and it differs from \
+                     yours; `gh dags submit --take-over {name}` replaces it with yours",
+                    style.yellow("note:"),
+                    st.remote
+                );
+            }
+            continue;
+        };
         if remote == pushed || remote == local {
             continue;
         }
@@ -621,6 +653,7 @@ pub fn sync(repo: &Repo, st: &mut State, gh: &Gh, style: &Style) -> Result<()> {
             Opts {
                 ready: false,
                 create: false,
+                take_over: Vec::new(),
             },
             style,
         )?;
@@ -706,6 +739,9 @@ fn reconcile(
             st.remote
         ));
     }
+    why.push_str(&format!(
+        "; to keep only yours: `gh dags submit --take-over {name}`"
+    ));
     Ok(Reconciled::Diverged(why))
 }
 
@@ -771,6 +807,7 @@ pub fn land(
             Opts {
                 ready: false,
                 create: true,
+                take_over: Vec::new(),
             },
             style,
         )?;
@@ -799,6 +836,7 @@ pub fn land(
             Opts {
                 ready: false,
                 create: true,
+                take_over: Vec::new(),
             },
             style,
         )?;

@@ -199,7 +199,11 @@ it's always a safe temporary base:
    stacks being rebuilt *and* any stack holding a PR whose base changes. Then
    retarget every such PR to trunk.
 3. **Push** every branch in one `git push --atomic`, with a per-branch
-   `--force-with-lease=<branch>:<last pushed sha>`.
+   `--force-with-lease=<branch>:<last pushed sha>`. A remote tip that the
+   local branch already contains is pushed over as is. A branch that's on the
+   remote but that gh-dags never pushed (someone else's) is refused unless
+   named in `--take-over`, which leases on its current tip and adopts its open
+   PR.
 4. **PRs.** Open any that are missing, with base = physical parent branch, draft
    by default, and title from the first commit. A change with no commits gets
    no PR, since GitHub refuses one. Then give the moved PRs their real bases.

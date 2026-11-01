@@ -706,6 +706,74 @@ fn sync_keeps_an_amend_when_github_only_rebased_it() {
 }
 
 #[test]
+fn submit_takes_over_a_branch_gh_dags_never_pushed() {
+    use std::io::Write;
+    let sb = Sandbox::new();
+    // Ivo's branch q, with his PR, is already on GitHub.
+    let ivo = sb.another_clone("ivo");
+    ivo.git(&["checkout", "-q", "-b", "q"]);
+    ivo.commit_file("ivo", "ivo\n", "Ivo's q");
+    ivo.git(&["push", "-q", "origin", "q"]);
+    let mut gh = command("gh", &ivo.work, sb._tmp.path())
+        .args([
+            "api",
+            "--method",
+            "POST",
+            "repos/acme/widgets/pulls",
+            "--input",
+            "-",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    gh.stdin
+        .take()
+        .unwrap()
+        .write_all(
+            br#"{"head": "q", "base": "main", "title": "Ivo's q", "body": "", "draft": false}"#,
+        )
+        .unwrap();
+    assert!(gh.wait().unwrap().success());
+    // Here, q is rebuilt and tracked.
+    sb.git(&["fetch", "-q"]);
+    sb.git(&["checkout", "-q", "-b", "q", "main"]);
+    sb.commit_file("mine", "mine\n", "my q");
+    sb.ok(&["track", "q", "--on", "main"]);
+
+    let out = sb.ok(&["sync"]);
+    assert!(
+        out.contains("q is on origin, but gh-dags never pushed it"),
+        "{out}"
+    );
+    let (ok, out) = sb.dags(&["submit"]);
+    assert!(
+        !ok && out.contains("q is already on origin, and gh-dags never pushed it")
+            && out.contains("gh dags submit --take-over q"),
+        "{out}"
+    );
+    assert_ne!(
+        sb.tip("q"),
+        sb.git(&["ls-remote", "origin", "q"])
+            .split('\t')
+            .next()
+            .unwrap()
+    );
+
+    let out = sb.ok(&["submit", "--take-over", "q"]);
+    assert!(!out.contains("opened"), "Ivo's PR is reused: {out}");
+    assert_eq!(
+        sb.git(&["ls-remote", "origin", "q"])
+            .split('\t')
+            .next()
+            .unwrap(),
+        sb.tip("q")
+    );
+    assert_eq!(sb.github()["prs"]["1"]["head"], "q");
+    assert!(sb.ok(&["view", "--json"]).contains("\"pr\": 1"));
+}
+
+#[test]
 fn land_hoists_what_a_change_needs() {
     let sb = Sandbox::new();
     for name in ["a", "b"] {
