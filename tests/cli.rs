@@ -1235,6 +1235,38 @@ fn restack_never_moves_changes_onto_an_older_trunk() {
 }
 
 #[test]
+fn new_can_start_a_change_in_its_own_worktree() {
+    let sb = Sandbox::new();
+    sb.ok(&["new", "a"]);
+    sb.commit_file("a", "a\n", "a");
+    let path = sb._tmp.path().join("wt-b");
+    let out = sb.ok(&["new", "b", "--worktree", path.to_str().unwrap()]);
+    assert!(
+        out.contains("layout: b on a") && out.contains("b is checked out in "),
+        "{out}"
+    );
+    assert_eq!(sb.branch(), "a", "this worktree stays where it was");
+    let wt = Sandbox {
+        _tmp: sb._tmp.clone(),
+        work: path.clone(),
+        env: sb.env.clone(),
+    };
+    assert_eq!(wt.branch(), "b");
+    assert_eq!(wt.status(), "");
+
+    // A path that's taken leaves nothing behind.
+    let (ok, out) = sb.dags(&["new", "c", "--worktree", path.to_str().unwrap()]);
+    assert!(!ok && out.contains("c wasn't created"), "{out}");
+    assert!(sb.git(&["branch", "--list", "c"]).is_empty());
+    assert!(!sb.ok(&["view"]).contains(" c"));
+    let (ok, _) = sb.dags(&["new", "c", "-m", "c", "--worktree", "../wt-c"]);
+    assert!(
+        !ok,
+        "a commit needs this worktree's changes, so it can't go elsewhere"
+    );
+}
+
+#[test]
 fn completion_offers_names_from_the_repo() {
     let sb = Sandbox::new();
     forked(&sb);

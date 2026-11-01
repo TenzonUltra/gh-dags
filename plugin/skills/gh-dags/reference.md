@@ -16,7 +16,7 @@ Run `gh dags <command> --help` for the full text of any of these.
 
 | Command | What it does |
 |---|---|
-| `gh dags new <name> [--on a,b] [--park] [-m <msg>] [--no-checkout]` | New change on its deps (default: the current change) |
+| `gh dags new <name> [--on a,b] [--park] [-m <msg>] [--no-checkout \| --worktree <path>]` | New change on its deps (default: the current change) |
 | `gh dags link <change> <dep>…` | Add dependencies |
 | `gh dags unlink <change> <dep>…` | Remove dependencies; the layout stays put |
 | `gh dags move <change> --onto <change-or-trunk>` | Move a change and everything on it |
