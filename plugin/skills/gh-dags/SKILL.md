@@ -14,7 +14,11 @@ rebasing, pushing, and PR bookkeeping.
 
 `gh dags view --json` prints the state: each change's deps and PR number, and
 the stacks. It's easier to read reliably than the tree that `gh dags view`
-draws. If gh-dags isn't set up in the repo, it says so. Run `gh dags init`
+draws. A stack's `base` is `"trunk"`, `{"change": "<name>"}` (it hangs off
+that change), or `{"sum": [...]}` (it's parked on a merge of those).
+
+Trunk means `origin/<trunk>` as last fetched, not your local trunk branch,
+which is often stale when there are many worktrees. `gh dags sync` fetches. If gh-dags isn't set up in the repo, it says so. Run `gh dags init`
 only if the user wants it.
 
 ## The loop
@@ -65,6 +69,17 @@ Doing these by hand to a tracked branch works against gh-dags:
   once it's clean.
 - `gh dags track <branch>` adopts an existing branch. If it says the deps are
   ambiguous, pass `--on`.
+
+## Parked changes
+
+- With several independent deps, a plain `--on a,b` stacks them in one line:
+  one PR after another, and it rewrites the change it moves (a new commit
+  hash, so a reviewer's recorded commit goes stale). `--park` keeps the deps
+  as independent PRs, and the new change local until all but one have landed.
+- To unpark a change sooner, `gh dags move` one member of its sum onto
+  another. They stack in one line, and the change sits on top.
+- A parked change on another parked change is rebuilt by itself as the deps
+  land; it doesn't need a `move`.
 
 ## When a restack doesn't finish
 

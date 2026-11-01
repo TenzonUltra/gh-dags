@@ -87,6 +87,7 @@ enum Cmd {
     },
     /// Create a change (a new branch) on top of what it depends on
     New {
+        /// Name of the change, which is also its branch
         name: String,
         /// Dependencies, comma-separated (default: the current change)
         #[arg(long, value_delimiter = ',', num_args = 1..)]
@@ -106,20 +107,28 @@ enum Cmd {
     },
     /// Track an existing branch as a change
     Track {
+        /// An existing branch
         branch: String,
         /// Dependencies, comma-separated (default: inferred from history)
         #[arg(long, value_delimiter = ',', num_args = 1..)]
         on: Option<Vec<String>>,
+        /// With several independent deps, sit on a local merge of them
+        /// instead of stacking them on each other
         #[arg(long)]
         park: bool,
         #[command(flatten)]
         later: Later,
     },
     /// Stop tracking a change (the branch is kept)
-    Untrack { change: String },
+    Untrack {
+        /// The change to stop tracking
+        change: String,
+    },
     /// Record that a change depends on others
     Link {
+        /// The change that depends on them
         change: String,
+        /// What it depends on
         #[arg(required = true)]
         deps: Vec<String>,
         #[command(flatten)]
@@ -127,15 +136,23 @@ enum Cmd {
     },
     /// Remove dependencies (the layout stays put)
     Unlink {
+        /// The change to drop them from
         change: String,
+        /// The dependencies to drop
         #[arg(required = true)]
         deps: Vec<String>,
         #[command(flatten)]
         later: Later,
     },
     /// Put a change, and everything on it, onto another change or the trunk
+    ///
+    /// The change keeps its deps: this only sets what it sits on, and a target
+    /// that isn't one of its deps is an ordering-only edge. Moving one member
+    /// of a parked change's sum onto another stacks them, which unparks it.
     Move {
+        /// The change to move, with everything on it
         change: String,
+        /// What it goes on: a change, or the trunk
         #[arg(long)]
         onto: String,
         #[command(flatten)]
@@ -143,6 +160,8 @@ enum Cmd {
     },
     /// Show the layout (the default command)
     View {
+        /// Print the whole state as JSON: each change's deps, fork point, and
+        /// PR, and the stacks with their bases
         #[arg(long)]
         json: bool,
     },
@@ -198,12 +217,14 @@ enum Cmd {
     },
     /// Switch to the change for a PR, importing its DAG first if it isn't here
     Checkout {
+        /// The PR's number
         pr: u64,
         #[command(flatten)]
         dest: Dest,
     },
     /// Switch to a change (with no name: pick from the tree)
     Switch {
+        /// The change to switch to
         change: Option<String>,
         #[command(flatten)]
         dest: Dest,
@@ -245,6 +266,7 @@ enum Cmd {
     /// Move a change and what it needs to the bottom of its stack, then merge
     /// them once GitHub has seen exactly that
     Land {
+        /// The change to land, with everything it needs
         change: String,
         /// squash, merge, or rebase (default: the repository's default)
         #[arg(long)]

@@ -1308,6 +1308,33 @@ fn comparable(sb: &Sandbox) -> serde_json::Value {
 }
 
 #[test]
+fn new_names_its_deps_and_submit_names_each_parked_change_once() {
+    let sb = Sandbox::new();
+    for name in ["a", "b", "x"] {
+        sb.git(&["checkout", "-q", "main"]);
+        sb.ok(&["new", name]);
+        sb.commit_file(name, &format!("{name}\n"), name);
+    }
+    sb.ok(&["new", "c", "--on", "a,b", "--park"]);
+    sb.commit_file("c", "c\n", "c");
+    sb.ok(&["new", "d", "--on", "c,x", "--park"]);
+    sb.commit_file("d", "d\n", "d");
+    let out = sb.ok(&["submit"]);
+    for line in [
+        "kept c local: it's parked on a ⊕ b",
+        "kept d local: it's parked on c ⊕ x",
+    ] {
+        assert!(out.contains(line), "missing {line:?} in:\n{out}");
+    }
+    assert!(!out.contains("kept c, d"), "{out}");
+
+    // Deps already in one line: the new change names them all.
+    sb.ok(&["move", "x", "--onto", "a"]);
+    let out = sb.ok(&["new", "f", "--on", "a,x", "--no-checkout"]);
+    assert!(out.contains("layout: f on x ← a, x"), "{out}");
+}
+
+#[test]
 fn import_rebuilds_the_dag_in_another_clone() {
     let a = Sandbox::new();
     a.ok(&["new", "auth"]);

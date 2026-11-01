@@ -447,7 +447,21 @@ pub fn describe_moves(before: &State, after: &State) -> Vec<String> {
         }
         let now = now.map(|b| describe_base(after, &b)).unwrap_or_default();
         let mut line = match was {
-            None => format!("{name} on {now}"),
+            // A new change: say its deps when they're more than its parent.
+            None => {
+                let deps = &after.changes[name].deps;
+                let on = match after.parent(name) {
+                    Some(Base::Change(p)) => BTreeSet::from([p]),
+                    Some(Base::Sum(ms)) => ms.into_iter().collect(),
+                    _ => BTreeSet::new(),
+                };
+                if *deps == on || deps.is_empty() {
+                    format!("{name} on {now}")
+                } else {
+                    let deps: Vec<&str> = deps.iter().map(String::as_str).collect();
+                    format!("{name} on {now} ← {}", deps.join(", "))
+                }
+            }
             Some(was) => format!("{name} now on {now} (was {})", describe_base(before, &was)),
         };
         if after.ordering_only_parent(name).is_some() {
@@ -712,7 +726,7 @@ mod tests {
         add(&mut s, "c", &["a", "b"]);
         assert_eq!(
             describe_moves(&before, &s),
-            ["b now on a (was main) · ordering only", "c on b"]
+            ["b now on a (was main) · ordering only", "c on b ← a, b"]
         );
     }
 
