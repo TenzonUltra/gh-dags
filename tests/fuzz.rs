@@ -178,6 +178,26 @@ impl World {
         self.log.push(format!("commit {subject}"));
     }
 
+    /// Rewrite `change`'s top commit with a new version of its file, as an
+    /// amend would.
+    fn amend(&mut self, change: &str) {
+        let v = self.m.version.entry(change.to_string()).or_insert(0);
+        *v += 1;
+        let subject = format!("{change} v{v}");
+        self.sb.git(&["checkout", "-q", change]);
+        std::fs::write(
+            self.sb.work.join(format!("{change}.txt")),
+            format!("{subject}\n"),
+        )
+        .unwrap();
+        self.sb
+            .git(&["commit", "-q", "-a", "--amend", "-m", &subject]);
+        let own = self.m.own.get_mut(change).unwrap();
+        own.pop();
+        own.push(subject.clone());
+        self.log.push(format!("amend to {subject}"));
+    }
+
     fn step(&mut self) {
         let st = self.state();
         let names: Vec<String> = st.changes.keys().cloned().collect();
@@ -983,6 +1003,9 @@ struct GithubCoverage {
     multi: usize,
     /// PR-less changes inserted under stacked PRs.
     inserted: usize,
+    /// Branches changed here while GitHub rebased them after a merge, whose
+    /// local work sync had to keep.
+    kept: usize,
 }
 
 impl World {
@@ -1180,16 +1203,58 @@ impl World {
             }
             st = self.state();
         }
-        let Some(c) = self.rng.pick(&deep(&st)).cloned() else {
+        // Sometimes a branch above `c` changes here after its last push, so
+        // it changes on both sides when GitHub rebases it after the merge:
+        // sync has to keep the local work. Then prefer a `c` with something
+        // above it.
+        let both_sides = self.rng.below(2) == 0;
+        let candidates = deep(&st);
+        let covered: Vec<String> = candidates
+            .iter()
+            .filter(|n| !st.is_top(n))
+            .cloned()
+            .collect();
+        let pool = if both_sides && !covered.is_empty() {
+            &covered
+        } else {
+            &candidates
+        };
+        let Some(c) = self.rng.pick(pool).cloned() else {
             return;
         };
         let before: BTreeSet<String> = st.changes.keys().cloned().collect();
+        // Hoist and push first, so the land merges without pushing the
+        // change made above.
+        if both_sides {
+            self.dags(&["land", &c, "--local"]);
+            let (ok, out) = self.dags(&["submit"]);
+            if !ok {
+                self.fail(&format!("submit failed:\n{out}"));
+            }
+            let st = self.state();
+            let (si, pos) = st.locate(&c).unwrap();
+            let above: Vec<String> = st.stacks[si].changes[pos + 1..]
+                .iter()
+                .filter(|n| st.children(n).is_empty() && st.changes[*n].pr.is_some())
+                .cloned()
+                .collect();
+            if let Some(leaf) = self.rng.pick(&above).cloned() {
+                if self.rng.below(2) == 0 && !self.m.own[&leaf].is_empty() {
+                    self.amend(&leaf);
+                } else {
+                    self.commit(&leaf);
+                }
+            }
+        }
         for _ in 0..3 {
             let (ok, out) = self.dags(&["land", &c, "--method", "squash"]);
             if !ok {
                 self.fail(&format!("land {c} failed:\n{out}"));
             }
             self.check_github(cov, false);
+            if out.contains("so yours is kept") {
+                cov.kept += 1;
+            }
             if out.contains("merged #") {
                 break;
             }
@@ -1296,6 +1361,7 @@ fn github(seeds: Vec<u64>, rounds: usize) {
         t.merged += c.merged;
         t.multi += c.multi;
         t.inserted += c.inserted;
+        t.kept += c.kept;
         t
     });
     eprintln!("github coverage: {total:?}");
@@ -1304,7 +1370,7 @@ fn github(seeds: Vec<u64>, rounds: usize) {
             total.rebuilt >= 1 && total.multi >= 1 && total.spur_stacks >= 1,
             "{total:?}"
         );
-        assert!(total.inserted >= 1, "{total:?}");
+        assert!(total.inserted >= 1 && total.kept >= 1, "{total:?}");
     }
 }
 

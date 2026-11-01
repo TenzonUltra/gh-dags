@@ -358,6 +358,31 @@ impl Git {
         Ok(out.lines().map(String::from).collect())
     }
 
+    /// The patch-id and message of each commit in `from..to`, oldest first.
+    /// Two ranges with equal lists hold the same commits, whatever they sit on.
+    pub fn patches(&self, from: &str, to: &str) -> Result<Vec<(String, String)>> {
+        let commits = self.run(&["rev-list", "--reverse", &format!("{from}..{to}")])?;
+        let mut out = Vec::new();
+        for c in commits.lines() {
+            let diff = self.run(&["diff-tree", "-p", "--no-commit-id", c])?;
+            let id = self.exec(&["patch-id", "--stable"], Some(&diff), &[])?;
+            let id = id
+                .stdout
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_string();
+            out.push((id, self.run(&["log", "-1", "--format=%B", c])?));
+        }
+        Ok(out)
+    }
+
+    pub fn count(&self, from: &str, to: &str) -> Result<usize> {
+        Ok(self
+            .run(&["rev-list", "--count", &format!("{from}..{to}")])?
+            .parse()?)
+    }
+
     /// Where the given branches are on the remote right now (absent if not there).
     pub fn remote_tips(
         &self,

@@ -161,10 +161,15 @@ layouts, reorders, fan-in across stacks, and growing spurs. After every
 
 After each merge, the full git oracle from §2 runs too.
 
+Before half the lands, the fuzz also commits to or amends a branch above the
+landing change after its last push. GitHub's rebase after the merge then meets
+a local change, and `sync` has to keep that local work. These count as "kept"
+(3 by default, 11 in the long run), and every run needs at least one.
+
 | Run | Submits | Stack rebuilds | Spur stacks | Merged | Multi-PR merges | PR-less inserts under a stack |
 |---|---|---|---|---|---|---|
-| default (3 seeds × 6 rounds) | 18 | 4 | 3 | 13 | 6 | 3 |
-| long (12 seeds × 12 rounds) | 144 | 43 | 44 | 177 | 71 | 23 |
+| default (3 seeds × 6 rounds) | 18 | 3 | 3 | 14 | 6 | 2 |
+| long (12 seeds × 12 rounds) | 144 | 40 | 50 | 138 | 63 | 26 |
 
 ## 4. Does it catch bugs?
 
@@ -185,6 +190,7 @@ earlier, put back).
 | No retarget-to-trunk before pushing (the real-GitHub bug) | §3 | `GitHub implicitly merged [1]` |
 | Absorb only PRs based on trunk | §3, after multi-PR merges were added | a merged change still tracked, holding others' files |
 | Unstack only what the plan rebuilds | §3, after PR-less inserts under stacks were added | GitHub's 422: a stacked PR's base can't change |
+| `sync` calls every branch changed on both sides diverged (the bug from real use) | §3, after branches above a land were changed locally | `land c1 failed: … changed both here and on GitHub` |
 | A worktree's branch moves without the worktree following | §2 | `c1's worktree has status "D  c0.txt"` |
 | A dirty worktree's branch is moved anyway | §2 | `c1 moved, though a dirty worktree holds it back` |
 | Clean worktrees are treated as dirty | §2 | `c1 was skipped, but no dirty worktree has it` |

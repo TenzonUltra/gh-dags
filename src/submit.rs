@@ -283,8 +283,9 @@ pub fn submit(repo: &Repo, st: &mut State, gh: &Gh, opts: Opts, style: &Style) -
             continue;
         }
         let pushed = st.changes[name].pushed.as_ref();
+        // A remote tip that local already contains is safe to push over.
         match (remote, pushed) {
-            (Some(r), Some(p)) if r != p => stale.push(name.clone()),
+            (Some(r), Some(p)) if r != p && !git.is_ancestor(r, &local) => stale.push(name.clone()),
             (Some(r), None) if !git.is_ancestor(r, &local) => stale.push(name.clone()),
             _ => leases.push((name.clone(), remote.cloned().unwrap_or_default())),
         }
@@ -522,7 +523,8 @@ pub fn sync(repo: &Repo, st: &mut State, gh: &Gh, style: &Style) -> Result<()> {
     }
 
     // Take remote rewrites (e.g. GitHub's rebase after a merge) when we
-    // haven't changed the branch since our last push.
+    // haven't changed the branch since our last push, or when the two sides
+    // hold the same commits. When both changed, see what each side holds.
     let mut diverged = Vec::new();
     let mut held = Vec::new();
     for name in st.topo_order()? {
@@ -536,9 +538,30 @@ pub fn sync(repo: &Repo, st: &mut State, gh: &Gh, style: &Style) -> Result<()> {
         if remote == pushed || remote == local {
             continue;
         }
+        let mut same = false;
         if local != pushed {
-            diverged.push(name);
-            continue;
+            match reconcile(git, st, &name, &pushed, &remote, &local)? {
+                Reconciled::Ahead { fork } => {
+                    let c = st.change_mut(&name)?;
+                    c.pushed = Some(remote);
+                    c.fork = fork.or(c.fork.take());
+                    println!("{name} already builds on what's on GitHub; yours gets pushed");
+                    continue;
+                }
+                Reconciled::Moved => {
+                    st.change_mut(&name)?.pushed = Some(remote);
+                    println!(
+                        "{name}: GitHub only rebased what gh-dags pushed, so yours is kept, \
+                         restacked, and pushed"
+                    );
+                    continue;
+                }
+                Reconciled::Same => same = true,
+                Reconciled::Diverged(why) => {
+                    diverged.push(why);
+                    continue;
+                }
+            }
         }
         if let Some(path) = worktree::checkout_of(git, &name)?
             && let Some(why) = worktree::blocker(git, &name, &path)
@@ -556,16 +579,22 @@ pub fn sync(repo: &Repo, st: &mut State, gh: &Gh, style: &Style) -> Result<()> {
         let c = st.change_mut(&name)?;
         c.fork = fork;
         c.pushed = Some(remote);
-        println!("took {name} from {} (it changed on GitHub)", st.remote);
+        if same {
+            println!(
+                "took {name} from {}: GitHub's rebase has the same commits as yours",
+                st.remote
+            );
+        } else {
+            println!("took {name} from {} (it changed on GitHub)", st.remote);
+        }
     }
     fast_forward_trunk(repo, st, &merged)?;
     repo.save(st)?;
     if !diverged.is_empty() {
         bail!(
-            "{} changed both here and on GitHub since the last push; reconcile by hand \
-             (e.g. rebase onto {}/<branch>), then run `gh dags submit`",
-            diverged.join(", "),
-            st.remote
+            "these changed both here and on GitHub since gh-dags last pushed them:\n  {}\n\
+             then run `gh dags sync` again",
+            diverged.join("\n  ")
         );
     }
     if !held.is_empty() {
@@ -601,6 +630,85 @@ pub fn sync(repo: &Repo, st: &mut State, gh: &Gh, style: &Style) -> Result<()> {
 }
 
 /// Bring local trunk up to the remote's, and step off a branch that merged.
+/// How a branch that changed both here and on GitHub since the last push
+/// reconciles, judged by the commits each side holds rather than by hash.
+enum Reconciled {
+    /// Local already contains GitHub's version; push local over it. `fork`
+    /// is where the change's own commits start now.
+    Ahead { fork: Option<String> },
+    /// GitHub only moved what was pushed onto a new base (its rebase after a
+    /// merge), so local has everything; restack it and push it.
+    Moved,
+    /// Both sides hold the same commits on different bases; take GitHub's.
+    Same,
+    /// Each side has commits the other lacks.
+    Diverged(String),
+}
+
+fn reconcile(
+    git: &Git,
+    st: &State,
+    name: &str,
+    pushed: &str,
+    remote: &str,
+    local: &str,
+) -> Result<Reconciled> {
+    // Where GitHub's version of the change starts: on its parent's branch
+    // there, or on trunk.
+    let parent_there = match st.parent(name) {
+        Some(Base::Trunk) => git.resolve(&format!("refs/remotes/{}/{}", st.remote, st.trunk)),
+        Some(Base::Change(p)) => git
+            .resolve(&format!("refs/remotes/{}/{p}", st.remote))
+            .or_else(|| git.resolve(&format!("refs/heads/{p}"))),
+        _ => None,
+    };
+    let base_there = parent_there.and_then(|p| git.merge_base(remote, &p));
+    if git.is_ancestor(remote, local) {
+        return Ok(Reconciled::Ahead { fork: base_there });
+    }
+    if let Some(base) = &base_there {
+        let theirs = git.patches(base, remote)?;
+        let fork = st.changes[name]
+            .fork
+            .clone()
+            .filter(|f| git.is_ancestor(f, local));
+        if let Some(fork) = fork
+            && git.patches(&fork, local)? == theirs
+        {
+            return Ok(Reconciled::Same);
+        }
+        if let Some(below) = git.resolve(&format!("{pushed}~{}", theirs.len()))
+            && git.patches(&below, pushed)? == theirs
+        {
+            return Ok(Reconciled::Moved);
+        }
+    }
+    let short = &pushed[..pushed.len().min(9)];
+    let side = |tip: &str, place: &str| -> Result<String> {
+        Ok(if git.is_ancestor(pushed, tip) {
+            let n = git.count(pushed, tip)?;
+            format!(
+                "{n} commit{} on top of it {place}",
+                if n == 1 { "" } else { "s" }
+            )
+        } else {
+            format!("rewritten {place}")
+        })
+    };
+    let mut why = format!(
+        "{name} (last pushed {short}): {}, {}",
+        side(local, "here")?,
+        side(remote, "on GitHub")?
+    );
+    if git.is_ancestor(pushed, local) {
+        why.push_str(&format!(
+            "; to keep both, put yours on GitHub's: `git rebase --onto {}/{name} {short} {name}`",
+            st.remote
+        ));
+    }
+    Ok(Reconciled::Diverged(why))
+}
+
 fn fast_forward_trunk(repo: &Repo, st: &State, merged: &[String]) -> Result<()> {
     let git = &repo.git;
     let (Some(remote), Some(local)) = (

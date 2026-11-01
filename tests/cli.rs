@@ -574,6 +574,137 @@ fn skill_install_writes_the_built_in_skill() {
     assert_eq!(fs::read_to_string(theirs).unwrap(), skill);
 }
 
+/// Push a rewrite of `branch` from another clone, as GitHub's rebase or
+/// someone else's push would, and fetch it here.
+fn rewrite_on_github(sb: &Sandbox, branch: &str, how: &[&[&str]]) {
+    let other = sb.another_clone(&format!("github-{branch}"));
+    other.git(&["checkout", "-q", branch]);
+    for args in how {
+        other.git(args);
+    }
+    other.git(&["push", "-q", "--force", "origin", branch]);
+    sb.git(&["fetch", "-q"]);
+}
+
+#[test]
+fn sync_reconciles_branches_that_changed_on_both_sides() {
+    // Yours builds on GitHub's version: push yours.
+    let sb = Sandbox::new();
+    sb.ok(&["new", "a"]);
+    sb.commit_file("a", "a\n", "a");
+    sb.ok(&["submit"]);
+    rewrite_on_github(
+        &sb,
+        "a",
+        &[&["commit", "-q", "--amend", "-m", "a, reworded"]],
+    );
+    sb.git(&["reset", "-q", "--hard", "origin/a"]);
+    sb.commit_file("a2", "a2\n", "more a");
+    let out = sb.ok(&["sync"]);
+    assert!(
+        out.contains("a already builds on what's on GitHub"),
+        "{out}"
+    );
+    assert_eq!(sb.tip("a"), sb.tip("origin/a"));
+    assert_eq!(sb.own_commits("main", "a"), ["a, reworded", "more a"]);
+
+    // The same commits under other hashes: take GitHub's.
+    let sb = Sandbox::new();
+    sb.ok(&["new", "a"]);
+    sb.commit_file("a", "a\n", "a");
+    sb.ok(&["submit"]);
+    let redate = [
+        "commit",
+        "-q",
+        "--amend",
+        "--no-edit",
+        "--date=2001-01-01T00:00:00",
+    ];
+    rewrite_on_github(&sb, "a", &[&redate]);
+    sb.git(&[
+        "commit",
+        "-q",
+        "--amend",
+        "--no-edit",
+        "--date=2002-02-02T00:00:00",
+    ]);
+    let out = sb.ok(&["sync"]);
+    assert!(
+        out.contains("GitHub's rebase has the same commits as yours"),
+        "{out}"
+    );
+    assert_eq!(sb.tip("a"), sb.tip("origin/a"));
+
+    // Both added commits: say what's where, and the hint has to work.
+    let sb = Sandbox::new();
+    sb.ok(&["new", "a"]);
+    sb.commit_file("a", "a\n", "a");
+    sb.ok(&["submit"]);
+    let pushed = sb.tip("a");
+    rewrite_on_github(
+        &sb,
+        "a",
+        &[&["commit", "-q", "--allow-empty", "-m", "theirs"]],
+    );
+    sb.commit_file("mine", "mine\n", "mine");
+    let (ok, out) = sb.dags(&["sync"]);
+    let hint = format!("git rebase --onto origin/a {} a", &pushed[..9]);
+    assert!(
+        !ok && out.contains("1 commit on top of it here, 1 commit on top of it on GitHub")
+            && out.contains(&hint),
+        "{out}"
+    );
+    sb.git(&["rebase", "-q", "--onto", "origin/a", &pushed[..9], "a"]);
+    let out = sb.ok(&["sync"]);
+    assert!(
+        out.contains("a already builds on what's on GitHub"),
+        "{out}"
+    );
+    assert_eq!(sb.own_commits("main", "a"), ["a", "theirs", "mine"]);
+    assert_eq!(sb.tip("a"), sb.tip("origin/a"));
+}
+
+#[test]
+fn sync_keeps_an_amend_when_github_only_rebased_it() {
+    // main ← a ← b; b is amended here, then a squash-merges and GitHub
+    // rebases the pushed b onto main.
+    let sb = Sandbox::new();
+    sb.ok(&["new", "a"]);
+    sb.commit_file("a", "a\n", "Add a");
+    sb.ok(&["new", "b"]);
+    sb.commit_file("b", "b\n", "Add b");
+    sb.ok(&["submit"]);
+    sb.commit_file("b", "b, amended\n", "Amend b");
+    let out = sb.ok(&["land", "a", "--method", "squash"]);
+    for line in [
+        "merged #1",
+        "b: GitHub only rebased what gh-dags pushed, so yours is kept",
+        "in sync",
+    ] {
+        assert!(out.contains(line), "missing {line:?} in:\n{out}");
+    }
+    assert_eq!(sb.own_commits("origin/main", "b"), ["Add b", "Amend b"]);
+    assert_eq!(sb.show("b", "b"), "b, amended");
+    assert_eq!(sb.tip("b"), sb.tip("origin/b"));
+    // And the next round is quiet.
+    let out = sb.ok(&["sync"]);
+    assert!(!out.contains("changed both"), "{out}");
+
+    // The same with a real amend, so local no longer contains what was pushed.
+    let sb = Sandbox::new();
+    sb.ok(&["new", "a"]);
+    sb.commit_file("a", "a\n", "Add a");
+    sb.ok(&["new", "b"]);
+    sb.commit_file("b", "b\n", "Add b");
+    sb.ok(&["submit"]);
+    fs::write(sb.work.join("b"), "b, amended\n").unwrap();
+    sb.git(&["commit", "-q", "-am", "Add b, amended", "--amend"]);
+    let out = sb.ok(&["land", "a", "--method", "squash"]);
+    assert!(out.contains("so yours is kept"), "{out}");
+    assert_eq!(sb.own_commits("origin/main", "b"), ["Add b, amended"]);
+    assert_eq!(sb.tip("b"), sb.tip("origin/b"));
+}
+
 #[test]
 fn land_hoists_what_a_change_needs() {
     let sb = Sandbox::new();
